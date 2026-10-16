@@ -1,0 +1,12 @@
+# Snakemake profile for the lab cluster. Use with:
+#   ob run benchmark.yaml -- --profile profiles/slurm
+# Requires snakemake-executor-plugin-slurm in the environment that runs ob.
+# Fill in the account/partition for the cluster before first use.
+executor: slurm
+jobs: 50
+latency-wait: 60
+default-resources:
+  slurm_account: CHANGE_ME
+  slurm_partition: CHANGE_ME
+  runtime: 60      # minutes
+  mem_mb: 8000

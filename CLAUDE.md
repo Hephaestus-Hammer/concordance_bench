@@ -62,12 +62,17 @@ concordance-bench/
 - Use the omnibenchmark-* skills before writing plan YAML, modules or running `ob`;
   the CLI changes between releases, so check `ob <cmd> --help` rather than guessing.
 
+## Filters
+
+`ob` 0.7.0 (pinned in `pixi.toml`) has `ob run --filter <file>`: an obfilter
+selection that prunes the DAG to picked stages/modules/param-combos. The files in
+`filters/` are those selections (`--allow-drift` tolerates plan changes since the
+filter was written). CPU-only can instead be done with capability gating: give
+GPU modules `requires_capabilities: [gpu]` and pass `--with-capability gpu` only
+on GPU hosts.
+
 ## Open questions
 
-- **filters/**: `ob run` has no option for running a subset of the plan (as of the
-  CLI reference checked). Options: separate plan files sharing a base, a script
-  that writes a filtered plan from `benchmark.yaml` + a filter file, or
-  `ob run -m <module>` for quick checks. Confirm with `ob run --help`.
 - **Own modules in this repo**: the plan pins modules to commits; local paths with
   uncommitted changes need `--dirty`. Either reference this repo's URL + commit,
   or move `hao_input`/`concordance` to a separate module repo (own CITATION.cff,
@@ -75,8 +80,14 @@ concordance-bench/
 
 ## Running
 
+Everything runs inside the pixi environment (`pixi shell`, or prefix with `pixi run`).
+
 ```sh
-ob run benchmark.yaml --cores 8                          # local
-ob run benchmark.yaml -- --profile profiles/slurm        # lab cluster (flags after -- go to Snakemake)
-ob run benchmark.yaml -m <module>                        # dev: one module's sub-graph only
+pixi run validate                                         # ob validate plan benchmark.yaml
+pixi run dry                                              # ob run benchmark.yaml --dry
+ob run benchmark.yaml --cores 8                           # local
+ob run benchmark.yaml --filter filters/smoke.yaml         # a slice of the plan
+ob run benchmark.yaml --with-capability gpu               # include GPU modules
+ob run benchmark.yaml -- --profile profiles/slurm         # lab cluster (flags after -- go to Snakemake)
+ob run benchmark.yaml -m <module>                         # dev: one module's sub-graph only
 ```
