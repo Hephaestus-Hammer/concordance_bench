@@ -1,0 +1,26 @@
+[workspace]
+name = "concordance-bench"
+channels = ["conda-forge", "bioconda"]
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[dependencies]
+python = "3.12.*"
+# analysis/
+numpy = "*"
+scipy = "*"
+pandas = "*"
+scikit-learn = "*"
+anndata = "*"
+h5py = "*"
+matplotlib = "*"
+pyyaml = "*"
+denet = "==0.10.3"          # per-job CPU/memory/GPU traces
+
+[pypi-dependencies]
+omnibenchmark = "==0.7.0"              # the `ob` CLI; pinned because its CLI changes between releases
+snakemake-executor-plugin-slurm = "*"  # for profiles/slurm
+
+[tasks]
+validate = "ob validate plan benchmark.yaml"
+dry = "ob run benchmark.yaml --dry"

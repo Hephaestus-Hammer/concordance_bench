@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this benchmark, please cite it as below."
+title: "concordance-bench"
+type: software
+authors:
+  - family-names: "CHANGE_ME"
+    given-names: "CHANGE_ME"
+repository-code: "https://github.com/Hephaestus-Hammer/concordance_bench"
+version: "0.1.0"

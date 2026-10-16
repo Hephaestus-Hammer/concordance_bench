@@ -1,0 +1,16 @@
+# ob output tree and local run scratch
+out/
+runs/
+
+# data
+*.h5ad
+*.h5
+*.loom
+
+# environments and caches
+.pixi/
+.snakemake/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.cache/
