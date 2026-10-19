@@ -1,0 +1,3 @@
+# Entrypoints for this repository's own modules, referenced from benchmark.yaml.
+entrypoints:
+  hao_input: modules/hao_input.py
