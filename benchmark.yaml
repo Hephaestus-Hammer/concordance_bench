@@ -1,0 +1,125 @@
+# concordance-bench: how far scanpy (CPU) and rapids-singlecell (GPU) agree, stage by stage.
+# PCA, kNN and clustering are separate stages, and every module consumes every upstream
+# output, so implementations mix (e.g. rapids PCA -> scanpy kNN -> rapids Leiden): that is
+# what attributes disagreement to a stage. Concordance itself is computed offline in analysis/.
+#
+# First version: every seed fixed at 0. Seed sensitivity and same-seed replicates come later.
+id: concordance_bench
+name: concordance-bench
+description: Stage-by-stage concordance of scanpy and rapids-singlecell pipelines on the Hao 2021 PBMC data
+benchmarker: "CHANGE_ME <CHANGE_ME>"
+version: "0.1.0"
+api_version: "0.7.0"
+
+software_backend: conda
+software_environments:
+  data: {conda: envs/data.yml}       # omnibenchmark/omni-huggingface
+  scanpy: {conda: envs/scanpy.yml}   # omni-scrna/scanpy; also runs hao_input
+  rapids: {conda: envs/rapids.yml}   # omni-scrna/rapids-singlecell (CUDA 13)
+
+stages:
+  # The published sc-brrr input (huggingface.co/datasets/btraven/sc-brrr-hao2021), pinned to a
+  # dataset revision: the same cells as sc-brrr. Each rung is a nested, label-stratified subsample
+  # of the log-normalised, 2,000-HVG Hao matrix. sha256 is not checked by the module; it is the
+  # value to check a download against.
+  - id: data
+    provides: [size]
+    outputs:
+      - {id: data_h5ad, path: "{name}.h5ad"}
+    modules:
+      - id: hao2021_10k
+        provides: {size: "10k"}
+        software_environment: data
+        repository: &hf {url: https://github.com/omnibenchmark/omni-huggingface, commit: dd042df5956fff3a022dde98a0fffa3e5517c503}
+        parameters:
+          - &hao2021 {repo: btraven/sc-brrr-hao2021, repo_type: dataset, revision: a61cd45f32445b9a84b6e003d64e463712fbf5af,
+              files: hao2021_10k.h5ad, sha256: 4f4d6f7b1dcc580ff68f18a99c0fd2a8413d610fae5974f85c3099633b9af03c}
+      - id: hao2021_50k
+        provides: {size: "50k"}
+        software_environment: data
+        repository: *hf
+        parameters:
+          - {<<: *hao2021, files: hao2021_50k.h5ad, sha256: 0e157b6e1fd185990e7c674b8c68515511ad2d80b4bd43ebc5e5429b53140228}
+      - id: hao2021_100k
+        provides: {size: "100k"}
+        software_environment: data
+        repository: *hf
+        parameters:
+          - {<<: *hao2021, files: hao2021_100k.h5ad, sha256: a8cbaaeef5651f699e11dd3719681488b3470b3bd8d8209070bf5cad466f81ad}
+
+  # .h5ad -> the omni-scrna FEAT stage output, so the omni-scrna modules below run unchanged.
+  # `replicate` is ignored by the module: more values later give same-seed replicate lineages.
+  - id: input
+    inputs: [data_h5ad]
+    outputs:
+      - {id: normalized_selected_h5, path: "{name}_normalized_selected.h5"}
+      - {id: rawdata_clusters_truth, path: "{name}.clusters_truth.tsv"}
+    modules:
+      - id: hao_input
+        software_environment: scanpy
+        repository: {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: a8111fb63669668a1abbf32f1834af4f340e9473, entrypoint: hao_input}
+        parameters:
+          - {replicate: [0]}
+
+  # Both read sparse input and compute in float64, so differences are the solvers'.
+  - id: pca
+    inputs: [normalized_selected_h5]
+    outputs:
+      - {id: embedding_tsv, path: "{name}_embedding.tsv"}
+      - {id: loadings_tsv, path: "{name}_loadings.tsv"}
+    resources: {cores: 8, mem_mb: 8000}
+    modules:
+      - id: pc-scanpy
+        name: "scanpy PCA (arpack)"
+        software_environment: scanpy
+        repository: &scanpy {url: https://github.com/omni-scrna/scanpy, commit: b98b70b7cd72be784356045f825d48a1a7dc9365, entrypoint: pca}
+        parameters:
+          - {solver: arpack, n_components: 50, dtype: float64, random_seed: 0}
+      - id: pc-rapids
+        name: "rapids-singlecell PCA (covariance eigh, GPU)"
+        software_environment: rapids
+        requires_capabilities: [gpu]
+        repository: &rapids {url: https://github.com/omni-scrna/rapids-singlecell, commit: 29b6614ca06b7aefb2d475377b5600f9dcd6fd64, entrypoint: pca}
+        parameters:
+          - {solver: covariance-eigh, n_components: 50, dtype: float64, random_seed: 0}
+
+  # scanpy's kNN is approximate (pynndescent above 4,096 cells); rapids' is exact (cuVS brute force).
+  - id: knn
+    inputs: [embedding_tsv]
+    outputs:
+      - {id: neighbors_h5, path: "{name}_neighbors.h5"}
+    resources: {cores: 8, mem_mb: 8000}
+    modules:
+      - id: nn-scanpy
+        name: "scanpy kNN (pynndescent, umap connectivities)"
+        software_environment: scanpy
+        repository: {<<: *scanpy, entrypoint: knn}
+        parameters:
+          - {n_neighbors: 15, flavor: umap, random_seed: 0}
+      - id: nn-rapids
+        name: "rapids-singlecell kNN (cuVS brute force, GPU)"
+        software_environment: rapids
+        requires_capabilities: [gpu]
+        repository: {<<: *rapids, entrypoint: knn}
+        parameters:
+          - {n_neighbors: 15, flavor: rapids, random_seed: 0}
+
+  - id: cluster
+    inputs: [neighbors_h5]
+    outputs:
+      - {id: clusters_tsv, path: "{name}_clusters.tsv"}
+    resources: {cores: 8, mem_mb: 8000}
+    modules:
+      - id: cl-scanpy
+        name: "scanpy Leiden (igraph)"
+        software_environment: scanpy
+        repository: {<<: *scanpy, entrypoint: cluster}
+        parameters:
+          - {flavor: igraph, resolution: 1.0, random_seed: 0}
+      - id: cl-rapids
+        name: "rapids-singlecell Leiden (GPU)"
+        software_environment: rapids
+        requires_capabilities: [gpu]
+        repository: {<<: *rapids, entrypoint: cluster}
+        parameters:
+          - {method: rapids-leiden, resolution: 1.0, random_seed: 0}

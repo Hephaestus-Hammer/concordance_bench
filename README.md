@@ -23,35 +23,62 @@ pixi install
 pixi shell        # or prefix commands with `pixi run`
 ```
 
+## The plan
+
+`benchmark.yaml` runs the Hao 2021 PBMC data at 10k, 50k and 100k cells through
+separate PCA, kNN and clustering stages, each with a scanpy (CPU) and a
+rapids-singlecell (GPU) module:
+
+```
+data -> input (hao_input) -> pca -> knn -> cluster
+```
+
+| Stage | scanpy | rapids-singlecell |
+|---|---|---|
+| `data` | the published sc-brrr input on Hugging Face, pinned to a dataset revision | |
+| `input` | `hao_input`: `.h5ad` -> omni-scrna feature-selection format + truth labels | |
+| `pca` | arpack, 50 PCs, float64 | covariance eigh, 50 PCs, float64 |
+| `knn` | 15 neighbours, pynndescent (approximate) | 15 neighbours, cuVS brute force (exact) |
+| `cluster` | Leiden (igraph), resolution 1.0 | Leiden, resolution 1.0 |
+
+Every module consumes every upstream output, so implementations mix (e.g. rapids
+PCA -> scanpy kNN -> rapids Leiden): 8 combinations per size, 24 in all. That is
+what attributes disagreement to a stage. The PCA, kNN and clustering modules are
+[omni-scrna/scanpy](https://github.com/omni-scrna/scanpy) and
+[omni-scrna/rapids-singlecell](https://github.com/omni-scrna/rapids-singlecell),
+run unchanged. Every seed is fixed at 0 for now.
+
 ## Running
 
 ```sh
-pixi run validate                                    # ob validate plan benchmark.yaml
-pixi run dry                                         # ob run benchmark.yaml --dry (writes out/Snakefile only)
-ob run benchmark.yaml --cores 8                      # the whole plan, locally
-ob run benchmark.yaml --filter filters/smoke.yaml    # a slice of the plan (see below)
-ob run benchmark.yaml --with-capability gpu          # include GPU modules
-ob run benchmark.yaml -- --profile profiles/slurm    # on the lab cluster (flags after -- go to Snakemake)
-ob run benchmark.yaml -m <module>                    # dev: one module's sub-graph only
+pixi run validate                                         # ob validate plan benchmark.yaml
+pixi run dry                                              # ob run benchmark.yaml --dry (writes out/Snakefile only)
+ob run benchmark.yaml --cores 8                           # the whole plan; on a CPU host, rapids is skipped
+ob run benchmark.yaml --cores 8 --with-capability gpu     # the whole plan, including rapids
+ob run benchmark.yaml --filter filters/smoke.yaml         # a slice of the plan (see below)
+ob run benchmark.yaml -- --profile profiles/slurm         # on the lab cluster (flags after -- go to Snakemake)
+ob run benchmark.yaml -m <module>                         # dev: one module's sub-graph only
 ```
 
 Results land in `out/` (gitignored), nested by stage, module and parameters.
+The data stage downloads from Hugging Face, so the host running it needs network
+access.
 
 ### Running part of the plan
 
 `ob run --filter <file>` prunes the plan to the stages, modules and parameter
 combinations picked in an obfilter file. The files in `filters/` are those picks:
 
-| Filter | Runs |
-|---|---|
-| `smoke.yaml` | Hao 10k, 2 seeds: a quick end-to-end check |
-| `cpu-only.yaml` | everything except GPU modules |
-| `full.yaml` | all sizes, all seeds |
+| Filter | Runs | Host |
+|---|---|---|
+| `smoke.yaml` | 10k, scanpy only: a quick end-to-end check | any |
+| `smoke-gpu.yaml` | 10k, all 8 scanpy/rapids combinations | GPU |
+| `cpu-only.yaml` | all sizes, scanpy only | any |
 
+**A filter bypasses the capability gate:** every module it picks runs, even
+rapids on a CPU host. That is why the CPU filters leave the rapids modules out.
 `--allow-drift` lets a filter run after the plan has changed, skipping picks that
-no longer exist. If GPU modules declare `requires_capabilities: [gpu]`, they only
-run when `--with-capability gpu` is passed, which may make `cpu-only.yaml`
-unnecessary.
+no longer exist.
 
 ## Layout
 
@@ -68,13 +95,12 @@ concordance-bench/
 ├── benchmark.yaml             # the ob plan: stages, modules pinned to commits, parameter sets
 ├── filters/                   # which parts of the plan to run (ob run --filter)
 │   ├── smoke.yaml
-│   ├── cpu-only.yaml
-│   └── full.yaml
+│   ├── smoke-gpu.yaml
+│   └── cpu-only.yaml
 ├── envs/                      # one conda env per software_environment in the plan
-│   ├── data.yml
-│   ├── scanpy.yml
-│   ├── rapids.yml
-│   └── analysis.yml
+│   ├── data.yml               #   omni-huggingface (data download)
+│   ├── scanpy.yml             #   omni-scrna/scanpy; also runs hao_input
+│   └── rapids.yml             #   omni-scrna/rapids-singlecell (CUDA 13)
 │
 ├── omnibenchmark.yaml         # entrypoints for this repo's own modules (below)
 ├── modules/
@@ -101,9 +127,8 @@ concordance-bench/
 └── out/                       # gitignored: ob writes here
 ```
 
-Not all of these exist yet: `benchmark.yaml`, `omnibenchmark.yaml`, the
-environment files, the filters, the modules and `LICENSE` come once the plan is
-designed.
+Not written yet: `modules/concordance.py`, the `analysis/` code, the docs and
+`LICENSE`.
 
 ## Citation
 

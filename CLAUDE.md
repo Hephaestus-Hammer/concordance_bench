@@ -24,10 +24,26 @@ pipelines (scanpy, rapids) across runs and seeds, plus resource use per job.
 - Stages, outputs and plan parameters are the author's decisions: ask before
   writing them into `benchmark.yaml`.
 - Run everything inside the pixi environment (`pixi run <cmd>` or `pixi shell`).
+- This repo's own modules (`modules/`, entrypoints in `omnibenchmark.yaml`) are
+  referenced from the plan by this repo's URL and a commit. Changing one is two
+  commits: the module, then the plan bumped to that commit's SHA. For local
+  development, point the module at `url: .` and run with `--dirty`.
+- `--filter` bypasses the capability gate: a filter that picks rapids modules runs
+  them even on a CPU host. Filters meant for CPU hosts must leave them out.
+- The omni-scrna module CLIs reject unknown arguments, so a plan parameter they
+  don't define fails the job.
 
 ## Open questions
 
-- **Own modules in this repo**: the plan pins modules to commits; local paths with
-  uncommitted changes need `--dirty`. Either reference this repo's URL + commit,
-  or move `hao_input`/`concordance` to a separate module repo (own CITATION.cff,
-  LICENSE, envs/, as `ob validate module` expects).
+- **Seed variability.** Every seed is fixed at 0. Each stage has its own
+  `random_seed`, so seed grids per stage would multiply across stages instead of
+  giving matched runs. Options: per-seed module copies gated by a `seed` lineage
+  label (`provides`/`requires`), or a small `ob` patch that substitutes lineage
+  labels into parameter values (`random_seed: "{seed}"`), proposed upstream.
+  Same-seed replicates are easy: add values to `hao_input`'s `replicate` list.
+- **Exact kNN reference.** scanpy's kNN is approximate, rapids' is exact. sc-brrr
+  (btraven00/sc-brrr) adds an exact sklearn reference; not included yet.
+- **Environment pinning.** `envs/` are the modules' own exports with loose version
+  ranges. Lock them to exact builds (as sc-brrr does) before comparing results.
+- **Resource traces.** No denet traces yet: the modules' `*-prof` entrypoints and
+  denet in each environment are needed for `analysis/resources.py`.
