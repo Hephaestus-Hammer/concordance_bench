@@ -1,14 +1,64 @@
 # concordance-bench
 
-Omnibenchmark (`ob`) benchmark measuring concordance between single-cell
-pipelines (scanpy, rapids) across runs and seeds, plus resource use per job.
-The README has the goals, the blessed baseline and how to run.
+An [Omnibenchmark](https://github.com/omnibenchmark/omnibenchmark) (`ob`) benchmark
+measuring concordance between single-cell pipelines (scanpy, rapids) across runs
+and seeds, plus resource use (CPU, memory, GPU) per job.
+
+## Goals
+
+_To be written._
+
+## Blessed baseline
+
+_To be written. The reasoning behind each setting goes in
+[`docs/decisions.md`](docs/decisions.md)._
+
+## Setup
+
+The environment is managed with [pixi](https://pixi.sh) and pins `ob`, denet and
+the analysis stack in `pixi.lock`.
+
+```sh
+pixi install
+pixi shell        # or prefix commands with `pixi run`
+```
+
+## Running
+
+```sh
+pixi run validate                                    # ob validate plan benchmark.yaml
+pixi run dry                                         # ob run benchmark.yaml --dry (writes out/Snakefile only)
+ob run benchmark.yaml --cores 8                      # the whole plan, locally
+ob run benchmark.yaml --filter filters/smoke.yaml    # a slice of the plan (see below)
+ob run benchmark.yaml --with-capability gpu          # include GPU modules
+ob run benchmark.yaml -- --profile profiles/slurm    # on the lab cluster (flags after -- go to Snakemake)
+ob run benchmark.yaml -m <module>                    # dev: one module's sub-graph only
+```
+
+Results land in `out/` (gitignored), nested by stage, module and parameters.
+
+### Running part of the plan
+
+`ob run --filter <file>` prunes the plan to the stages, modules and parameter
+combinations picked in an obfilter file. The files in `filters/` are those picks:
+
+| Filter | Runs |
+|---|---|
+| `smoke.yaml` | Hao 10k, 2 seeds: a quick end-to-end check |
+| `cpu-only.yaml` | everything except GPU modules |
+| `full.yaml` | all sizes, all seeds |
+
+`--allow-drift` lets a filter run after the plan has changed, skipping picks that
+no longer exist. If GPU modules declare `requires_capabilities: [gpu]`, they only
+run when `--with-capability gpu` is passed, which may make `cpu-only.yaml`
+unnecessary.
 
 ## Layout
 
 ```
 concordance-bench/
-├── README.md                  # goals, blessed baseline, how to run
+├── README.md
+├── CLAUDE.md                  # working rules for Claude Code sessions
 ├── CITATION.cff
 ├── LICENSE
 ├── pixi.toml                  # environment for running ob and for the analysis
@@ -16,10 +66,10 @@ concordance-bench/
 ├── .gitignore                 # out/, runs/, *.h5ad, caches
 │
 ├── benchmark.yaml             # the ob plan: stages, modules pinned to commits, parameter sets
-├── filters/                   # which parts of the plan to run
-│   ├── smoke.yaml             #   Hao 10k, 2 seeds: quick end-to-end check
-│   ├── cpu-only.yaml          #   no GPU modules
-│   └── full.yaml              #   all sizes, all seeds
+├── filters/                   # which parts of the plan to run (ob run --filter)
+│   ├── smoke.yaml
+│   ├── cpu-only.yaml
+│   └── full.yaml
 ├── envs/                      # one conda env per software_environment in the plan
 │   ├── data.yml
 │   ├── scanpy.yml
@@ -48,35 +98,13 @@ concordance-bench/
 │   ├── tables/                #   summary CSVs (per stage x pipeline x dataset)
 │   └── figures/
 │
-└── out/                       # gitignored: ob writes here (nested by stage/module/parameters)
+└── out/                       # gitignored: ob writes here
 ```
 
-## Rules
+Not all of these exist yet: `benchmark.yaml`, `omnibenchmark.yaml`, the
+environment files, the filters, the modules and `LICENSE` come once the plan is
+designed.
 
-- `analysis/` only reads `out/`; it never writes into the ob output tree.
-- `results/` holds only small, committed outputs (summary CSVs, final figures).
-- Metrics are developed in `analysis/concordance.py` first and become the
-  `modules/concordance.py` stage only once proven.
-- Every metric is defined in `docs/metrics.md`; every non-default setting is
-  justified in `docs/decisions.md`.
-- Use the omnibenchmark-* skills before writing plan YAML, modules or running `ob`;
-  the CLI changes between releases, so check `ob <cmd> --help` rather than guessing.
+## Citation
 
-## Open questions
-
-- **filters/**: `ob run` has no option for running a subset of the plan (as of the
-  CLI reference checked). Options: separate plan files sharing a base, a script
-  that writes a filtered plan from `benchmark.yaml` + a filter file, or
-  `ob run -m <module>` for quick checks. Confirm with `ob run --help`.
-- **Own modules in this repo**: the plan pins modules to commits; local paths with
-  uncommitted changes need `--dirty`. Either reference this repo's URL + commit,
-  or move `hao_input`/`concordance` to a separate module repo (own CITATION.cff,
-  LICENSE, envs/, as `ob validate module` expects).
-
-## Running
-
-```sh
-ob run benchmark.yaml --cores 8                          # local
-ob run benchmark.yaml -- --profile profiles/slurm        # lab cluster (flags after -- go to Snakemake)
-ob run benchmark.yaml -m <module>                        # dev: one module's sub-graph only
-```
+See [`CITATION.cff`](CITATION.cff).
