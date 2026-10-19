@@ -6,12 +6,41 @@ and seeds, plus resource use (CPU, memory, GPU) per job.
 
 ## Goals
 
-_To be written._
+Answering the how much invisible computational choices in the PCA $\rightarrow$ kNN step (hardware, library, build, seed) and clustering change the results, how does that compare with seed noise, and does it grow with dataset size?
 
 ## Blessed baseline
 
-_To be written. The reasoning behind each setting goes in
-[`docs/decisions.md`](docs/decisions.md)._
+## Blessed baseline
+
+The reference every other pipeline is compared against: a CPU pipeline with every
+source of randomness and approximation removed, so that repeated runs give
+bitwise-identical results. Full reasoning and the defaults it overrides:
+[`docs/decisions.md`](docs/decisions.md).
+
+```mermaid
+flowchart LR
+    data[("Hao 2021<br/>log-normalised,<br/>2,000 HVGs")] --> pca
+    pca["<b>PCA</b><br/>covariance_eigh<br/>50 PCs · float64"] --> knn
+    knn["<b>kNN graph</b><br/>exact (brute force)<br/>k = 15 · UMAP weights"] --> leiden
+    leiden["<b>Leiden</b><br/>leidenalg · undirected<br/>until converged · γ = 1<br/>seeds 0–19"]
+```
+
+| Stage | Setting | Why |
+|---|---|---|
+| PCA | `covariance_eigh`, float64 | Direct method: no iterations, tolerance or random start, so the seed has no effect. scanpy's default (`arpack`) is iterative and seed-dependent. |
+| kNN | exact search, `method="umap"` | Exact at every size; scanpy's default switches silently to approximate search above 8,192 cells. Connectivities are deterministic once the neighbours are fixed. |
+| Leiden | leidenalg, `directed=False`, `n_iterations=-1`, resolution 1.0 | Reproducible per seed and runs to convergence; avoids igraph's `n_iterations=-1` bug; undirected like the GPU implementation. |
+| All | single-threaded BLAS, versions pinned | Multithreaded reductions can change results in the last bits between runs. |
+
+Leiden is a randomised heuristic: different seeds reach different, equally valid
+partitions. The baseline is therefore run over 20 seeds, and the **seed-to-seed
+agreement is the noise floor** against which other pipelines (scanpy defaults,
+rapids-singlecell, other kNN libraries and builds) are judged.
+
+**Status:** the PCA, kNN and Leiden options above are not yet all exposed by
+`omni-scrna/scanpy` (`covariance_eigh`, exact kNN and `n_iterations` are missing);
+pull requests are planned. Until then the plan runs scanpy defaults and
+rapids-singlecell only.
 
 ## Setup
 
