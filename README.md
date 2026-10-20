@@ -86,7 +86,8 @@ pixi run dry                                              # ob run benchmark.yam
 ob run benchmark.yaml --cores 8                           # the whole plan; on a CPU host, rapids is skipped
 ob run benchmark.yaml --cores 8 --with-capability gpu     # the whole plan, including rapids
 ob run benchmark.yaml --filter filters/smoke.yaml         # a slice of the plan (see below)
-ob run benchmark.yaml -- --profile profiles/slurm         # on the lab cluster (flags after -- go to Snakemake)
+sbatch run.sbatch filters/smoke.yaml                      # on Slurm, inside one allocation (see run.sbatch)
+ob run benchmark.yaml -- --profile profiles/slurm         # on Slurm, one job per rule (flags after -- go to Snakemake)
 ob run benchmark.yaml -m <module>                         # dev: one module's sub-graph only
 ```
 

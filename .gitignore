@@ -14,3 +14,6 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .cache/
+
+# Slurm logs from run.sbatch
+concordance-bench-*.log
