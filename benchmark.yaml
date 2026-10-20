@@ -70,7 +70,7 @@ stages:
     resources: {cores: 8, mem_mb: 8000}
     modules:
       - id: pc-scanpy
-        name: "scanpy PCA (arpack)"
+        name: "scanpy defaults: PCA (arpack)"
         software_environment: scanpy
         repository: &scanpy {url: https://github.com/omni-scrna/scanpy, commit: b98b70b7cd72be784356045f825d48a1a7dc9365, entrypoint: pca}
         parameters:
@@ -83,7 +83,8 @@ stages:
         parameters:
           - {solver: covariance-eigh, n_components: 50, dtype: float64, random_seed: 0}
 
-  # scanpy's kNN is approximate (pynndescent above 4,096 cells); rapids' is exact (cuVS brute force).
+  # scanpy's kNN is exact below 8,192 cells (euclidean) and pynndescent, approximate, above: so
+  # approximate at every size here. rapids' is exact (cuVS brute force).
   - id: knn
     inputs: [embedding_tsv]
     outputs:
@@ -91,7 +92,7 @@ stages:
     resources: {cores: 8, mem_mb: 8000}
     modules:
       - id: nn-scanpy
-        name: "scanpy kNN (pynndescent, umap connectivities)"
+        name: "scanpy defaults: kNN (pynndescent above 8,192 cells, umap connectivities)"
         software_environment: scanpy
         repository: {<<: *scanpy, entrypoint: knn}
         parameters:
@@ -111,7 +112,7 @@ stages:
     resources: {cores: 8, mem_mb: 8000}
     modules:
       - id: cl-scanpy
-        name: "scanpy Leiden (igraph)"
+        name: "scanpy defaults: Leiden (igraph, 2 iterations)"
         software_environment: scanpy
         repository: {<<: *scanpy, entrypoint: cluster}
         parameters:

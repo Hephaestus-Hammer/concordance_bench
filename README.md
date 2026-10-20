@@ -10,8 +10,6 @@ Answering how much invisible computational choices in the PCA $\rightarrow$ kNN 
 
 ## Blessed baseline
 
-## Blessed baseline
-
 The reference every other pipeline is compared against: a CPU pipeline with every
 source of randomness and approximation removed, so that repeated runs give
 bitwise-identical results. Full reasoning and the defaults it overrides:
@@ -62,13 +60,15 @@ rapids-singlecell (GPU) module:
 data -> input (hao_input) -> pca -> knn -> cluster
 ```
 
-| Stage | scanpy | rapids-singlecell |
+| Stage | scanpy defaults | rapids-singlecell |
 |---|---|---|
 | `data` | the published sc-brrr input on Hugging Face, pinned to a dataset revision | |
 | `input` | `hao_input`: `.h5ad` -> omni-scrna feature-selection format + truth labels | |
 | `pca` | arpack, 50 PCs, float64 | covariance eigh, 50 PCs, float64 |
-| `knn` | 15 neighbours, pynndescent (approximate) | 15 neighbours, cuVS brute force (exact) |
-| `cluster` | Leiden (igraph), resolution 1.0 | Leiden, resolution 1.0 |
+| `knn` | 15 neighbours, pynndescent (approximate above 8,192 cells) | 15 neighbours, cuVS brute force (exact) |
+| `cluster` | Leiden (igraph, 2 iterations), resolution 1.0 | Leiden, resolution 1.0 |
+
+The blessed baseline is not in the plan yet: see its status note above.
 
 Every module consumes every upstream output, so implementations mix (e.g. rapids
 PCA -> scanpy kNN -> rapids Leiden): 8 combinations per size, 24 in all. That is
