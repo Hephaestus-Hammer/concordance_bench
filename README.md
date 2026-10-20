@@ -6,7 +6,7 @@ and seeds, plus resource use (CPU, memory, GPU) per job.
 
 ## Goals
 
-Answering the how much invisible computational choices in the PCA $\rightarrow$ kNN step (hardware, library, build, seed) and clustering change the results, how does that compare with seed noise, and does it grow with dataset size?
+Answering how much invisible computational choices in the PCA $\rightarrow$ kNN step (hardware, library, build, seed) and clustering change the results, how does that compare with seed noise, and does it grow with dataset size?
 
 ## Blessed baseline
 
