@@ -1,6 +1,7 @@
-# concordance-bench: how far scanpy (CPU) and rapids-singlecell (GPU) agree, stage by stage.
+# concordance-bench: how far scanpy defaults (CPU), the blessed baseline (CPU) and
+# rapids-singlecell (GPU) agree, stage by stage.
 # PCA, kNN and clustering are separate stages, and every module consumes every upstream
-# output, so implementations mix (e.g. rapids PCA -> scanpy kNN -> rapids Leiden): that is
+# output, so implementations mix (e.g. rapids PCA -> baseline kNN -> scanpy Leiden): that is
 # what attributes disagreement to a stage. Concordance itself is computed offline in analysis/.
 #
 # First version: every seed fixed at 0. Seed sensitivity and same-seed replicates come later.
@@ -75,6 +76,15 @@ stages:
         repository: &scanpy {url: https://github.com/omni-scrna/scanpy, commit: b98b70b7cd72be784356045f825d48a1a7dc9365, entrypoint: pca}
         parameters:
           - {solver: arpack, n_components: 50, dtype: float64, random_seed: 0}
+      # The blessed baseline (README): deterministic, single-threaded BLAS. Pinned to the
+      # Hephaestus-Hammer/scanpy fork (branch baseline-options), which exposes covariance_eigh,
+      # exact kNN and n_iterations; back to omni-scrna/scanpy once merged upstream.
+      - id: pc-baseline
+        name: "Baseline: PCA (covariance_eigh, float64, 1 BLAS thread)"
+        software_environment: scanpy
+        repository: &baseline {url: https://github.com/Hephaestus-Hammer/scanpy, commit: d9535dc8c8ab5c84d925be230d858b23c2b15b89, entrypoint: pca}
+        parameters:
+          - {solver: covariance_eigh, n_components: 50, dtype: float64, blas_threads: 1, random_seed: 0}
       - id: pc-rapids
         name: "rapids-singlecell PCA (covariance eigh, GPU)"
         software_environment: rapids
@@ -97,6 +107,12 @@ stages:
         repository: {<<: *scanpy, entrypoint: knn}
         parameters:
           - {n_neighbors: 15, flavor: umap, random_seed: 0}
+      - id: nn-baseline
+        name: "Baseline: kNN (exact, sklearn brute force, umap connectivities)"
+        software_environment: scanpy
+        repository: {<<: *baseline, entrypoint: knn}
+        parameters:
+          - {n_neighbors: 15, flavor: umap, transformer: sklearn, random_seed: 0}
       - id: nn-rapids
         name: "rapids-singlecell kNN (cuVS brute force, GPU)"
         software_environment: rapids
@@ -117,6 +133,13 @@ stages:
         repository: {<<: *scanpy, entrypoint: cluster}
         parameters:
           - {flavor: igraph, resolution: 1.0, random_seed: 0}
+      # Seeds 0-19 per the README once the seed design is settled; seed 0 for now.
+      - id: cl-baseline
+        name: "Baseline: Leiden (leidenalg, until converged, undirected)"
+        software_environment: scanpy
+        repository: {<<: *baseline, entrypoint: cluster}
+        parameters:
+          - {flavor: leidenalg, n_iterations: -1, resolution: 1.0, random_seed: 0}
       - id: cl-rapids
         name: "rapids-singlecell Leiden (GPU)"
         software_environment: rapids

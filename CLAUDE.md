@@ -41,8 +41,13 @@ pipelines (scanpy, rapids) across runs and seeds, plus resource use per job.
   label (`provides`/`requires`), or a small `ob` patch that substitutes lineage
   labels into parameter values (`random_seed: "{seed}"`), proposed upstream.
   Same-seed replicates are easy: add values to `hao_input`'s `replicate` list.
-- **Exact kNN reference.** scanpy's kNN is approximate, rapids' is exact. sc-brrr
-  (btraven00/sc-brrr) adds an exact sklearn reference; not included yet.
+  The baseline's PCA and kNN ignore the seed, so its 20 seeds (README) could be a
+  plain `random_seed` list on `cl-baseline` alone.
+- **Baseline on a fork.** `pc-/nn-/cl-baseline` pin `Hephaestus-Hammer/scanpy`
+  (branch `baseline-options`), which adds `covariance_eigh`, `--transformer` and
+  `--n_iterations` to omni-scrna/scanpy. Move them back to `omni-scrna/scanpy`
+  once those are merged upstream. `knn.py` and `cluster.py` have no BLAS thread
+  setting yet, so only the baseline PCA is single-threaded.
 - **Environment pinning.** `envs/` are the modules' own exports with loose version
   ranges. Lock them to exact builds (as sc-brrr does) before comparing results.
 - **Resource traces.** No denet traces yet: the modules' `*-prof` entrypoints and

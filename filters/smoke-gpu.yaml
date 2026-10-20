@@ -1,4 +1,4 @@
-# obfilter: quick end-to-end check on a GPU host: the 10k rung, every scanpy/rapids combination.
+# obfilter: quick end-to-end check on a GPU host: the 10k rung, every module combination.
 picks:
   data:
     hao2021_10k: all
@@ -6,10 +6,13 @@ picks:
     hao_input: all
   pca:
     pc-scanpy: all
+    pc-baseline: all
     pc-rapids: all
   knn:
     nn-scanpy: all
+    nn-baseline: all
     nn-rapids: all
   cluster:
     cl-scanpy: all
+    cl-baseline: all
     cl-rapids: all

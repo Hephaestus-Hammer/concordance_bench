@@ -1,4 +1,4 @@
-# obfilter: quick end-to-end check that runs on any host: the 10k rung, scanpy only.
+# obfilter: quick end-to-end check that runs on any host: the 10k rung, scanpy defaults + baseline.
 # A filter bypasses the capability gate, so GPU modules must be left out here explicitly.
 picks:
   data:
@@ -7,7 +7,10 @@ picks:
     hao_input: all
   pca:
     pc-scanpy: all
+    pc-baseline: all
   knn:
     nn-scanpy: all
+    nn-baseline: all
   cluster:
     cl-scanpy: all
+    cl-baseline: all

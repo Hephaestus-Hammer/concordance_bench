@@ -35,10 +35,12 @@ partitions. The baseline is therefore run over 20 seeds, and the **seed-to-seed
 agreement is the noise floor** against which other pipelines (scanpy defaults,
 rapids-singlecell, other kNN libraries and builds) are judged.
 
-**Status:** the PCA, kNN and Leiden options above are not yet all exposed by
-`omni-scrna/scanpy` (`covariance_eigh`, exact kNN and `n_iterations` are missing);
-pull requests are planned. Until then the plan runs scanpy defaults and
-rapids-singlecell only.
+**Status:** `omni-scrna/scanpy` does not yet expose `covariance_eigh`, exact kNN
+or `n_iterations`. The baseline modules (`pc-baseline`, `nn-baseline`,
+`cl-baseline`) therefore run the
+[`Hephaestus-Hammer/scanpy`](https://github.com/Hephaestus-Hammer/scanpy/tree/baseline-options)
+fork, which adds them; the plan moves back to `omni-scrna/scanpy` once they are
+merged upstream. The baseline runs seed 0 only until the seed design is settled.
 
 ## Setup
 
@@ -53,26 +55,25 @@ pixi shell        # or prefix commands with `pixi run`
 ## The plan
 
 `benchmark.yaml` runs the Hao 2021 PBMC data at 10k, 50k and 100k cells through
-separate PCA, kNN and clustering stages, each with a scanpy (CPU) and a
-rapids-singlecell (GPU) module:
+separate PCA, kNN and clustering stages, each with three modules: scanpy
+defaults (CPU), the blessed baseline (CPU) and rapids-singlecell (GPU):
 
 ```
 data -> input (hao_input) -> pca -> knn -> cluster
 ```
 
-| Stage | scanpy defaults | rapids-singlecell |
-|---|---|---|
-| `data` | the published sc-brrr input on Hugging Face, pinned to a dataset revision | |
-| `input` | `hao_input`: `.h5ad` -> omni-scrna feature-selection format + truth labels | |
-| `pca` | arpack, 50 PCs, float64 | covariance eigh, 50 PCs, float64 |
-| `knn` | 15 neighbours, pynndescent (approximate above 8,192 cells) | 15 neighbours, cuVS brute force (exact) |
-| `cluster` | Leiden (igraph, 2 iterations), resolution 1.0 | Leiden, resolution 1.0 |
-
-The blessed baseline is not in the plan yet: see its status note above.
+| Stage | scanpy defaults | baseline | rapids-singlecell |
+|---|---|---|---|
+| `data` | the published sc-brrr input on Hugging Face, pinned to a dataset revision | | |
+| `input` | `hao_input`: `.h5ad` -> omni-scrna feature-selection format + truth labels | | |
+| `pca` | arpack, 50 PCs, float64 | covariance_eigh, 50 PCs, float64, 1 BLAS thread | covariance eigh, 50 PCs, float64 |
+| `knn` | 15 neighbours, pynndescent (approximate above 8,192 cells) | 15 neighbours, exact (sklearn brute force) | 15 neighbours, cuVS brute force (exact) |
+| `cluster` | Leiden (igraph, 2 iterations), resolution 1.0 | Leiden (leidenalg, until converged), resolution 1.0 | Leiden, resolution 1.0 |
 
 Every module consumes every upstream output, so implementations mix (e.g. rapids
-PCA -> scanpy kNN -> rapids Leiden): 8 combinations per size, 24 in all. That is
-what attributes disagreement to a stage. The PCA, kNN and clustering modules are
+PCA -> baseline kNN -> scanpy Leiden): 27 combinations per size, 81 in all (8 per
+size on a CPU host). That is what attributes disagreement to a stage. The
+scanpy-defaults and rapids modules are
 [omni-scrna/scanpy](https://github.com/omni-scrna/scanpy) and
 [omni-scrna/rapids-singlecell](https://github.com/omni-scrna/rapids-singlecell),
 run unchanged. Every seed is fixed at 0 for now.
@@ -100,9 +101,9 @@ combinations picked in an obfilter file. The files in `filters/` are those picks
 
 | Filter | Runs | Host |
 |---|---|---|
-| `smoke.yaml` | 10k, scanpy only: a quick end-to-end check | any |
-| `smoke-gpu.yaml` | 10k, all 8 scanpy/rapids combinations | GPU |
-| `cpu-only.yaml` | all sizes, scanpy only | any |
+| `smoke.yaml` | 10k, CPU modules (scanpy defaults + baseline): a quick end-to-end check | any |
+| `smoke-gpu.yaml` | 10k, every module: 27 combinations | GPU |
+| `cpu-only.yaml` | all sizes, CPU modules (scanpy defaults + baseline) | any |
 
 **A filter bypasses the capability gate:** every module it picks runs, even
 rapids on a CPU host. That is why the CPU filters leave the rapids modules out.

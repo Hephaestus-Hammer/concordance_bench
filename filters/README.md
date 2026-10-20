@@ -5,9 +5,9 @@ prunes the DAG to the picked stages, modules and parameter combinations.
 
 | File | Runs | Host |
 |---|---|---|
-| `smoke.yaml` | 10k, scanpy only | any |
-| `smoke-gpu.yaml` | 10k, all 8 scanpy/rapids combinations | GPU |
-| `cpu-only.yaml` | all sizes, scanpy only | any |
+| `smoke.yaml` | 10k, CPU modules (scanpy defaults + baseline): 8 combinations | any |
+| `smoke-gpu.yaml` | 10k, every module: 27 combinations | GPU |
+| `cpu-only.yaml` | all sizes, CPU modules (scanpy defaults + baseline) | any |
 
 The full plan needs no filter: `ob run benchmark.yaml --with-capability gpu`.
 
