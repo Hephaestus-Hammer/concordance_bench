@@ -24,3 +24,4 @@ snakemake-executor-plugin-slurm = "*"  # for profiles/slurm
 [tasks]
 validate = "ob validate plan benchmark.yaml"
 dry = "ob run benchmark.yaml --dry"
+report = "python analysis/report.py --from_out out --output_dir results/report"

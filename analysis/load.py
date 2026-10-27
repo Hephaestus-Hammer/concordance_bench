@@ -1,4 +1,167 @@
 """Find runs in the ob output tree (out/): stage, module, parameters, seed.
 
 Reads only; never writes into out/.
+
+ob nests every node's directory inside its parent's, so a file's path is its
+whole lineage:
+
+    out/<stage>/<module>/.<hash>/<stage>/<module>/.<hash>/.../<file>
+
+Each node directory holds the parameters.json that ob writes for that node.
 """
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+import pandas as pd
+
+# output id (as in benchmark.yaml) -> filename suffix
+OUTPUTS = {
+    "embedding_tsv": "_embedding.tsv",
+    "neighbors_h5": "_neighbors.h5",
+    "clusters_tsv": "_clusters.tsv",
+    "rawdata_clusters_truth": ".clusters_truth.tsv",
+}
+
+# Parameters that only choose a seed or a replicate. Two runs that differ only in
+# these have the same settings, so their disagreement is seed noise.
+SEED_PARAMS = {"random_seed", "seed", "replicate"}
+
+
+@dataclass(frozen=True)
+class Node:
+    stage: str
+    module: str
+    params: tuple  # sorted (key, value) pairs, seeds included
+
+    @property
+    def settings(self):
+        return tuple((k, v) for k, v in self.params if k not in SEED_PARAMS)
+
+    @property
+    def seeds(self):
+        return tuple((k, v) for k, v in self.params if k in SEED_PARAMS)
+
+
+def _read_params(node_dir):
+    f = node_dir / "parameters.json"
+    if not f.exists():
+        return ()
+    p = json.loads(f.read_text())
+    if isinstance(p, dict) and isinstance(p.get("parameters"), dict):
+        p = p["parameters"]
+    if not isinstance(p, dict):
+        return ()
+    # values may be lists or numbers; keep them hashable and printable
+    return tuple(sorted((k, v if isinstance(v, (str, int, float, bool)) else json.dumps(v))
+                        for k, v in p.items()))
+
+
+def _is_node_dir(d):
+    return d.name.startswith(".") or (d / "parameters.json").exists()
+
+
+def lineage(path):
+    """Nodes from the dataset down to the node that wrote `path`."""
+    nodes = []
+    d = Path(path).absolute().parent
+    while _is_node_dir(d) and d.parent != d:
+        module, stage = d.parent, d.parent.parent
+        nodes.append(Node(stage.name, module.name, _read_params(d)))
+        d = stage.parent
+        if (d / "Snakefile").exists() or (d / ".metadata").exists():
+            break
+    if not nodes:
+        raise ValueError(f"not inside an ob output tree: {path}")
+    return tuple(reversed(nodes))
+
+
+def find(out_dir):
+    """{output id: [paths]} for every output under out_dir."""
+    out_dir = Path(out_dir)
+    skip = {".modules", ".snakemake", ".envs", ".logs", ".metadata"}
+    return {oid: sorted(p for p in out_dir.rglob(f"*{suffix}") if not skip & set(p.parts))
+            for oid, suffix in OUTPUTS.items()}
+
+
+def index(files):
+    """One row per output file: output id, size (dataset module), lineage, label.
+
+    `files` is {output id: [paths]}, as from find() or a gather invocation.
+    """
+    rows = []
+    for oid, paths in files.items():
+        for p in paths or []:
+            nodes = lineage(p)
+            rows.append({"output": oid, "path": str(p), "size": nodes[0].module, "nodes": nodes})
+    df = pd.DataFrame(rows, columns=["output", "path", "size", "nodes"])
+    df["label"] = _labels(df["nodes"].tolist())
+    return df
+
+
+def _labels(all_nodes):
+    """Short pipeline labels from PCA on, e.g. 'pc-scanpy > nn-rapids > cl-baseline'.
+
+    A module is followed by its settings only if it ran with more than one, and by
+    its seeds only if seeds vary in this run.
+    """
+    variants, seeds = {}, {}
+    for nodes in all_nodes:
+        for n in nodes[1:]:
+            variants.setdefault((n.stage, n.module), set()).add(n.settings)
+            seeds.setdefault((n.stage, n.module), set()).add(n.seeds)
+    labels = []
+    for nodes in all_nodes:
+        parts = []
+        for n in nodes[1:]:
+            if n.stage == "input" and len(nodes) > 2:
+                continue  # the input conversion is shared by everything after it
+            s = n.module
+            if len(variants[(n.stage, n.module)]) > 1:
+                s += "(" + ",".join(f"{k}={v}" for k, v in n.settings) + ")"
+            if len(seeds[(n.stage, n.module)]) > 1:
+                s += "[" + ",".join(f"{k}={v}" for k, v in n.seeds) + "]"
+            parts.append(s)
+        labels.append(" > ".join(parts) or nodes[-1].module)
+    return labels
+
+
+def pair_category(a, b):
+    """What differs between two lineages of the same size and depth.
+
+    Returns the '+'-joined stages whose module or settings differ ('knn',
+    'pca+knn', ...); 'seed' if only seeds differ; 'replicate' if only the input
+    replicate differs.
+    """
+    differ, seed_keys = [], set()
+    for x, y in zip(a[1:], b[1:]):
+        if x.module != y.module or x.settings != y.settings:
+            differ.append(x.stage)
+        elif x.seeds != y.seeds:
+            seed_keys |= {k for (k, v1), (_, v2) in zip(x.seeds, y.seeds) if v1 != v2}
+    if differ:
+        return "+".join(differ)
+    if seed_keys and seed_keys <= {"replicate"}:
+        return "replicate"
+    return "seed" if seed_keys else "identical"
+
+
+def missing(df, output):
+    """Combinations that should exist for `output` but don't, per size.
+
+    Expected = every parent lineage found x every (module, parameters) found at
+    this stage. A failed job shows up here instead of silently shrinking the grid.
+    """
+    rows = []
+    sub = df[df["output"] == output]
+    for size, g in sub.groupby("size"):
+        have = set(g["nodes"])
+        parents = {n[:-1] for n in have}
+        own = {n[-1] for n in have}
+        for p in sorted(parents, key=str):
+            for o in sorted(own, key=str):
+                if p + (o,) not in have:
+                    rows.append({"size": size, "parent": " > ".join(n.module for n in p[1:]),
+                                 "module": o.module, "params": dict(o.params)})
+    return pd.DataFrame(rows, columns=["size", "parent", "module", "params"])
