@@ -70,24 +70,40 @@ def pca_max_angle(a, b, k):
 
 # ---- kNN -----------------------------------------------------------------------
 
-def _neighbour_keys(d):
-    """Stored edges without the diagonal, as row * n + col.
+def neighbours_per_cell(d):
+    """Stored neighbours per cell, not counting the cell itself (median over cells)."""
+    c = d.tocoo()
+    return int(np.median(np.bincount(c.row[c.row != c.col], minlength=d.shape[0])))
 
-    The cell itself is not counted as a neighbour, whether or not a module stores
-    it. Stored zero distances to other cells (duplicates) are kept: they are real
-    neighbours.
+
+def _nearest_keys(d, k):
+    """Each cell's k nearest stored neighbours (by distance, self excluded), as row * n + col.
+
+    Modules do not store the same number of neighbours: scanpy keeps n_neighbors - 1
+    on its exact path but pynndescent's raw n_neighbors (+ self) on its approximate
+    path. Comparing the k nearest on both sides compares like with like. Stored zero
+    distances to other cells (duplicates) are kept: they are real neighbours.
     """
     c = d.tocoo()
     keep = c.row != c.col
-    rows = c.row[keep].astype(np.int64)
-    return rows * d.shape[0] + c.col[keep], rows
+    rows, cols, dist = c.row[keep].astype(np.int64), c.col[keep], c.data[keep]
+    order = np.lexsort((cols, dist, rows))  # by row, then distance, then index for ties
+    rows, cols = rows[order], cols[order]
+    start = np.searchsorted(rows, rows)  # first position of each row
+    take = (np.arange(len(rows)) - start) < k
+    return rows[take] * d.shape[0] + cols[take], rows[take]
 
 
-def knn_shared_fraction(d1, d2):
-    """Per cell: neighbours in both graphs / size of the larger neighbour set."""
+def knn_shared_fraction(d1, d2, k=None):
+    """Per cell: share of its k nearest neighbours that the two graphs have in common.
+
+    k defaults to the smaller of the two graphs' neighbours per cell.
+    """
     n = d1.shape[0]
-    k1, r1 = _neighbour_keys(d1)
-    k2, r2 = _neighbour_keys(d2)
+    if k is None:
+        k = min(neighbours_per_cell(d1), neighbours_per_cell(d2))
+    k1, r1 = _nearest_keys(d1, k)
+    k2, r2 = _nearest_keys(d2, k)
     shared = np.bincount(r1[np.isin(k1, k2)], minlength=n)
     size = np.maximum(np.bincount(r1, minlength=n), np.bincount(r2, minlength=n))
     return np.divide(shared, size, out=np.ones(n), where=size > 0)

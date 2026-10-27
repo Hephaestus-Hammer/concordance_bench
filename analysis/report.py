@@ -51,8 +51,10 @@ DESCRIPTIONS = {
         without changing the subspace, so the table also gives the largest principal angle
         between the spans of the first <i>k</i> components, which is insensitive to that.""",
     "knn": """Each point is a pair of kNN graphs on the same cells. The x-axis is the mean over
-        cells of the shared-neighbour fraction: neighbours found in both graphs divided by the
-        size of the larger neighbour set (the cell itself is not counted). <code>knn</code> pairs
+        cells of the shared-neighbour fraction: of each cell's <i>k</i> nearest neighbours (the cell
+        itself not counted), the share found in both graphs. Modules store different numbers of
+        neighbours (scanpy keeps 14 on its exact path but 15 on its approximate one for
+        <code>n_neighbors=15</code>), so <i>k</i> is the smaller of the two; the table shows both. <code>knn</code> pairs
         share their PCA input, so they show the kNN step's own effect; <code>pca</code> pairs use
         the same kNN module on different PCA outputs, so they show what PCA differences carry
         into the graph. The table adds the share of cells whose neighbour sets are identical.""",
@@ -113,9 +115,11 @@ def compute(df):
             graphs.append(cc.align_graph(d, cells, order))
         for i, j in itertools.combinations(range(len(graphs)), 2):
             a, b = by["neighbors_h5"].iloc[i], by["neighbors_h5"].iloc[j]
-            frac = cc.knn_shared_fraction(graphs[i], graphs[j])
+            ka, kb = cc.neighbours_per_cell(graphs[i]), cc.neighbours_per_cell(graphs[j])
+            frac = cc.knn_shared_fraction(graphs[i], graphs[j], k=min(ka, kb))
             t["knn"].append({"size": size, "pair": f"{a['label']}  vs  {b['label']}",
                              "category": pair_category(a["nodes"], b["nodes"]),
+                             "neighbours stored": f"{ka} / {kb}", "k compared": min(ka, kb),
                              "mean_shared": float(frac.mean()),
                              "cells_identical": float((frac == 1).mean())})
         del graphs

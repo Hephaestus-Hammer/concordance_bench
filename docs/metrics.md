@@ -37,11 +37,17 @@ order and rotation within the span.
 
 ## kNN overlap
 
-Per cell: the number of neighbours found in both graphs divided by the size of
-the larger of the two neighbour sets. The cell itself is never counted, whether
-or not a module stores it, so with `n_neighbors = 15` each set has 14 cells.
-Neighbours at distance 0 (duplicate cells) are counted. Reported as the mean
-over cells and as the share of cells whose neighbour sets are identical.
+Per cell: of its *k* nearest neighbours in each graph (by stored distance; the
+cell itself never counted), the share found in both. Neighbours at distance 0
+(duplicate cells) are counted. Reported as the mean over cells and as the share
+of cells whose *k* nearest neighbours are identical.
+
+*k* is the smaller of the two graphs' neighbours per cell, because modules don't
+store the same number. For `n_neighbors = 15`, scanpy's exact path stores 14
+(n_neighbors − 1, as documented), but its approximate path stores pynndescent's
+raw output: the cell itself as an explicit zero plus 15 neighbours. Comparing
+all stored neighbours would cap the overlap at 14/15 even for identical
+searches. The report shows the stored counts of both graphs next to each pair.
 
 ## ARI
 
