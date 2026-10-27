@@ -4,7 +4,11 @@
 # output, so implementations mix (e.g. rapids PCA -> baseline kNN -> scanpy Leiden): that is
 # what attributes disagreement to a stage. Concordance itself is computed offline in analysis/.
 #
-# First version: every seed fixed at 0. Seed sensitivity and same-seed replicates come later.
+# Seeds: modules that use their seed (arpack PCA, pynndescent kNN, every Leiden) list seeds
+# 0-19; seed 0 comes first. Lists expand as a grid across stages, so run through a filter:
+# `first` keeps seed 0 for a module, `all` keeps every seed. filters/noise-*.yaml vary one
+# stage's seed at a time; the other filters keep seed 0 everywhere. Modules that ignore the
+# seed (covariance_eigh PCA, exact kNN) keep a single seed 0.
 id: concordance_bench
 name: concordance-bench
 description: Stage-by-stage concordance of scanpy and rapids-singlecell pipelines on the Hao 2021 PBMC data
@@ -75,7 +79,7 @@ stages:
         software_environment: scanpy
         repository: &scanpy {url: https://github.com/omni-scrna/scanpy, commit: b98b70b7cd72be784356045f825d48a1a7dc9365, entrypoint: pca}
         parameters:
-          - {solver: arpack, n_components: 50, dtype: float64, random_seed: 0}
+          - {solver: arpack, n_components: 50, dtype: float64, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
       # The blessed baseline (README): deterministic, single-threaded BLAS. Pinned to the
       # Hephaestus-Hammer/scanpy fork (branch baseline-options), which exposes covariance_eigh,
       # exact kNN and n_iterations; back to omni-scrna/scanpy once merged upstream.
@@ -106,7 +110,7 @@ stages:
         software_environment: scanpy
         repository: {<<: *scanpy, entrypoint: knn}
         parameters:
-          - {n_neighbors: 15, flavor: umap, random_seed: 0}
+          - {n_neighbors: 15, flavor: umap, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
       - id: nn-baseline
         name: "Baseline: kNN (exact, sklearn brute force, umap connectivities)"
         software_environment: scanpy
@@ -132,18 +136,17 @@ stages:
         software_environment: scanpy
         repository: {<<: *scanpy, entrypoint: cluster}
         parameters:
-          - {flavor: igraph, resolution: 1.0, random_seed: 0}
-      # Seeds 0-19 per the README once the seed design is settled; seed 0 for now.
+          - {flavor: igraph, resolution: 1.0, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
       - id: cl-baseline
         name: "Baseline: Leiden (leidenalg, until converged, undirected)"
         software_environment: scanpy
         repository: {<<: *baseline, entrypoint: cluster}
         parameters:
-          - {flavor: leidenalg, n_iterations: -1, resolution: 1.0, random_seed: 0}
+          - {flavor: leidenalg, n_iterations: -1, resolution: 1.0, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
       - id: cl-rapids
         name: "rapids-singlecell Leiden (GPU)"
         software_environment: rapids
         requires_capabilities: [gpu]
         repository: {<<: *rapids, entrypoint: cluster}
         parameters:
-          - {method: rapids-leiden, resolution: 1.0, random_seed: 0}
+          - {method: rapids-leiden, resolution: 1.0, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}

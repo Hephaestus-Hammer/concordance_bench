@@ -13,7 +13,9 @@ INK, INK_2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 # floor, so they get neutral greys; stage differences get colours.
 CATEGORY_COLOURS = {
     "replicate": "#b0afab",
-    "seed": "#52514e",
+    "seed: pca": "#8c8b87",
+    "seed: knn": "#6b6a66",
+    "seed: cluster": "#3d3c3a",
     "pca": "#2a78d6",
     "knn": "#eb6834",
     "cluster": "#1baf7a",
@@ -41,6 +43,8 @@ def categories_in(values):
 def colour(category):
     if category in CATEGORY_COLOURS:
         return CATEGORY_COLOURS[category]
+    if category.startswith("seed"):
+        return "#52514e"
     return _EXTRA[hash(category) % len(_EXTRA)]
 
 

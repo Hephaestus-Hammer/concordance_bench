@@ -11,10 +11,12 @@ Every pair of runs is labelled by what differs between their lineages
 
 - the stages whose module or settings differ, joined by `+` (`pca`, `knn`,
   `pca+knn`, `cluster`, …);
-- `seed` if only random seeds differ;
+- `seed: <stage>` if only random seeds differ, naming the stage(s) whose seed
+  differs (`seed: pca`, `seed: knn`, `seed: cluster`): that stage's noise
+  floor, measured at every downstream output;
 - `replicate` if only the input replicate differs.
 
-`seed` and `replicate` pairs are the noise floor. A stage difference is only
+`seed: …` and `replicate` pairs are the noise floor. A stage difference is only
 interesting if its pairs fall outside that spread.
 
 ## PCA |cos|

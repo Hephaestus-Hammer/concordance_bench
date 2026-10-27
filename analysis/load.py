@@ -131,20 +131,24 @@ def pair_category(a, b):
     """What differs between two lineages of the same size and depth.
 
     Returns the '+'-joined stages whose module or settings differ ('knn',
-    'pca+knn', ...); 'seed' if only seeds differ; 'replicate' if only the input
-    replicate differs.
+    'pca+knn', ...). If only seeds differ: 'seed: <stages>' with the stages whose
+    seed differs ('seed: pca', 'seed: cluster', ...), the noise floor of those
+    stages; 'replicate' if only the input replicate differs.
     """
-    differ, seed_keys = [], set()
+    differ, seeded, seed_keys = [], [], set()
     for x, y in zip(a[1:], b[1:]):
         if x.module != y.module or x.settings != y.settings:
             differ.append(x.stage)
         elif x.seeds != y.seeds:
-            seed_keys |= {k for (k, v1), (_, v2) in zip(x.seeds, y.seeds) if v1 != v2}
+            keys = {k for (k, v1), (_, v2) in zip(x.seeds, y.seeds) if v1 != v2}
+            seed_keys |= keys
+            if keys - {"replicate"}:
+                seeded.append(x.stage)
     if differ:
         return "+".join(differ)
-    if seed_keys and seed_keys <= {"replicate"}:
-        return "replicate"
-    return "seed" if seed_keys else "identical"
+    if seeded:
+        return "seed: " + "+".join(seeded)
+    return "replicate" if seed_keys else "identical"
 
 
 def missing(df, output):

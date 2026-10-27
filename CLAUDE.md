@@ -35,14 +35,13 @@ pipelines (scanpy, rapids) across runs and seeds, plus resource use per job.
 
 ## Open questions
 
-- **Seed variability.** Every seed is fixed at 0. Each stage has its own
-  `random_seed`, so seed grids per stage would multiply across stages instead of
-  giving matched runs. Options: per-seed module copies gated by a `seed` lineage
-  label (`provides`/`requires`), or a small `ob` patch that substitutes lineage
-  labels into parameter values (`random_seed: "{seed}"`), proposed upstream.
-  Same-seed replicates are easy: add values to `hao_input`'s `replicate` list.
-  The baseline's PCA and kNN ignore the seed, so its 20 seeds (README) could be a
-  plain `random_seed` list on `cl-baseline` alone.
+- **Seeds (decided 27/10).** Seeded modules list `random_seed` 0-19 (seed 0
+  first); the noise floor is measured one stage at a time through
+  `filters/noise-*.yaml` (`all` on one stage, `first` elsewhere). Matched seeds
+  across stages are not needed: a seed number means nothing across stages. Every
+  `ob run` goes through a filter. Same-seed replicates (non-seed noise such as
+  GPU atomics) will be separate `ob run`s into separate output folders, merged in
+  `analysis/`, instead of `hao_input`'s `replicate` parameter (Ben's suggestion).
 - **Baseline on a fork.** `pc-/nn-/cl-baseline` pin `Hephaestus-Hammer/scanpy`
   (branch `baseline-options`), which adds `covariance_eigh`, `--transformer` and
   `--n_iterations` to omni-scrna/scanpy. Move them back to `omni-scrna/scanpy`

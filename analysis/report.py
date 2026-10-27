@@ -40,9 +40,10 @@ DESCRIPTIONS = {
     "labels": """Pipelines are named by their module ids from PCA on
         (<code>pc-… &gt; nn-… &gt; cl-…</code>). A pair of runs is grouped by <b>what differs</b>
         between them: the stages whose module or settings differ (<code>pca</code>,
-        <code>knn</code>, <code>pca+knn</code>, …), <code>seed</code> if only random seeds differ,
-        or <code>replicate</code> if only the input replicate differs. Seed and replicate pairs are
-        the noise floor; colours are the same in every figure.""",
+        <code>knn</code>, <code>pca+knn</code>, …); <code>seed: &lt;stage&gt;</code> if only that
+        stage's random seed differs, which is that stage's noise floor; or <code>replicate</code>
+        if only the input replicate differs. Noise-floor groups are grey; colours are the same
+        in every figure.""",
     "pca": """One line per pair of PCA runs on the same cells. The y-axis is 1&nbsp;&minus;&nbsp;|cos|
         between the cell scores of matching components, on a log scale (zero is drawn at
         10<sup>&minus;16</sup>). |cos| ignores sign, which is arbitrary in PCA. Values near
@@ -61,8 +62,9 @@ DESCRIPTIONS = {
     "ari": """Each point is one pair of Leiden clusterings of the same cells, measured by the
         adjusted Rand index (ARI; 1 = identical partitions, about 0 = chance), grouped by what
         differs between the two pipelines. The line is the median. A stage whose pairs fall
-        inside the spread of the <code>seed</code> pairs changes the clustering no more than
-        re-running with another seed.""",
+        inside the spread of the <code>seed: …</code> pairs changes the clustering no more than
+        re-running with another seed. A seed varied upstream (<code>seed: pca</code>) shows how
+        that stage's noise carries through to the clusters.""",
     "truth": """ARI of each pipeline's clustering against the annotated cell types, one marker
         per annotation column in the truth file. The number of clusters at a fixed resolution
         usually differs from the number of annotated types, which keeps the ARI below 1 for
@@ -208,7 +210,8 @@ def render(df, tables, n_cells, source):
               .reindex(sizes).rename_axis(columns=None).reset_index())
     counts.insert(1, "cells", counts["size"].map(n_cells))
     miss = pd.concat([missing(df, oid) for oid in OUTPUTS], ignore_index=True)
-    has_floor = tables["ari"]["category"].isin(["seed", "replicate"]).any()
+    has_floor = (tables["ari"]["category"].str.startswith("seed")
+                 | (tables["ari"]["category"] == "replicate")).any()
     floor_note = None if has_floor else (
         "No seed or replicate pairs in this run, so there is no noise floor yet: "
         "differences below cannot be compared with seed noise.")
