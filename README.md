@@ -91,6 +91,13 @@ ob run benchmark.yaml -m <module>                         # dev: one module's su
 ```
 
 Results land in `out/` (gitignored), nested by stage, module and parameters.
+
+```sh
+pixi run report        # every metric and figure in one file: results/report/concordance_report.html
+```
+
+The report also writes one TSV per table next to the HTML. It reads `out/` and
+never writes into it.
 The data stage downloads from Hugging Face, so the host running it needs network
 access.
 
@@ -144,7 +151,8 @@ concordance-bench/
 │   ├── load.py                #   finds runs in out/: stage, module, parameters, seed
 │   ├── concordance.py         #   PCA |cos| and subspace, kNN overlap, ARI between runs and seeds
 │   ├── resources.py           #   parses denet traces: CPU, memory, GPU over time per job
-│   └── figures.py             #   the plotting.py panels, plus resource plots
+│   ├── figures.py             #   one function per report figure
+│   └── report.py              #   all of the above in one self-contained HTML file
 │
 ├── docs/
 │   ├── decisions.md           # why the blessed settings: defaults table, code findings
@@ -157,8 +165,7 @@ concordance-bench/
 └── out/                       # gitignored: ob writes here
 ```
 
-Not written yet: `modules/concordance.py`, the `analysis/` code, the docs and
-`LICENSE`.
+Not written yet: `modules/concordance.py`, `analysis/resources.py` and `LICENSE`.
 
 ## Citation
 
