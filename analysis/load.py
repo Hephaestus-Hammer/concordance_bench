@@ -151,16 +151,56 @@ def pair_category(a, b):
     return "replicate" if seed_keys else "identical"
 
 
+def seed_variants(df):
+    """{(stage, module, settings): set of seeds seen} over every lineage in df."""
+    out = {}
+    for nodes in df["nodes"]:
+        for n in nodes:
+            out.setdefault((n.stage, n.module, n.settings), set()).add(n.seeds)
+    return out
+
+
+def comparable(a, b, variants):
+    """Whether two lineages make a like-for-like pair.
+
+    Seed pairs: same settings everywhere, seed differs at exactly one stage
+    (one stage's noise floor). Settings pairs: wherever the settings are the same,
+    the seeds are the same too; where the settings differ, the seeds match as well
+    if both modules ran several seeds (a matched sample, not every cross-seed
+    combination). Anything else mixes a settings difference with seed noise.
+    """
+    differ, seed_differ, unmatched = 0, 0, False
+    for x, y in zip(a[1:], b[1:]):
+        if x.module != y.module or x.settings != y.settings:
+            differ += 1
+            if x.seeds != y.seeds and min(len(variants[(x.stage, x.module, x.settings)]),
+                                          len(variants[(y.stage, y.module, y.settings)])) > 1:
+                unmatched = True
+        elif x.seeds != y.seeds:
+            seed_differ += 1
+    if differ:
+        return seed_differ == 0 and not unmatched
+    return seed_differ == 1 or (seed_differ == 0 and a != b)
+
+
+def _at_base_seed(nodes, base):
+    return all(n.seeds == base[(n.stage, n.module, n.settings)] for n in nodes)
+
+
 def missing(df, output):
     """Combinations that should exist for `output` but don't, per size.
 
-    Expected = every parent lineage found x every (module, parameters) found at
-    this stage. A failed job shows up here instead of silently shrinking the grid.
+    Checked on the base grid only (every module at its first seed, normally 0):
+    expected = every parent lineage found there x every (module, parameters) found
+    at this stage. Extra seeds are run one stage at a time through filters, so their
+    gaps are deliberate and not reported. A failed base job shows up here instead of
+    silently shrinking the grid.
     """
+    base = {k: min(v, key=lambda s: tuple(str(x) for x in s)) for k, v in seed_variants(df).items()}
     rows = []
     sub = df[df["output"] == output]
     for size, g in sub.groupby("size"):
-        have = set(g["nodes"])
+        have = {n for n in g["nodes"] if _at_base_seed(n, base)}
         parents = {n[:-1] for n in have}
         own = {n[-1] for n in have}
         for p in sorted(parents, key=str):

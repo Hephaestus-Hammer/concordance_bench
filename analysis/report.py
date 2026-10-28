@@ -21,6 +21,7 @@ import base64
 import html
 import io
 import itertools
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -29,7 +30,7 @@ import pandas as pd
 
 import concordance as cc
 import figures as fg
-from load import OUTPUTS, find, index, missing, pair_category
+from load import OUTPUTS, comparable, find, index, missing, pair_category, seed_variants
 
 DESCRIPTIONS = {
     "runs": """What the report was built from: the number of output files per stage and
@@ -43,33 +44,40 @@ DESCRIPTIONS = {
         <code>knn</code>, <code>pca+knn</code>, …); <code>seed: &lt;stage&gt;</code> if only that
         stage's random seed differs, which is that stage's noise floor; or <code>replicate</code>
         if only the input replicate differs. Noise-floor groups are grey; colours are the same
-        in every figure.""",
-    "pca": """One line per pair of PCA runs on the same cells. The y-axis is 1&nbsp;&minus;&nbsp;|cos|
+        in every figure. Only like-for-like pairs are compared: seed pairs differ in exactly one
+        stage's seed, and pairs that differ in a stage's settings have the same seeds everywhere
+        else (and at that stage too, when both modules ran several seeds), so a settings
+        difference is never mixed with seed noise.""",
+    "pca": """One line per group of pairs of PCA runs on the same cells: the median over the
+        pairs, with their range shaded. The y-axis is 1&nbsp;&minus;&nbsp;|cos|
         between the cell scores of matching components, on a log scale (zero is drawn at
         10<sup>&minus;16</sup>). |cos| ignores sign, which is arbitrary in PCA. Values near
         10<sup>&minus;16</sup> mean identical up to round-off; values near 1 mean the component
         points somewhere else. Late components with nearly equal variance can swap or mix
         without changing the subspace, so the table also gives the largest principal angle
         between the spans of the first <i>k</i> components, which is insensitive to that.""",
-    "knn": """Each point is a pair of kNN graphs on the same cells. The x-axis is the mean over
+    "knn": """Each point is a pair of kNN graphs on the same cells. The y-axis is the mean over
         cells of the shared-neighbour fraction: of each cell's <i>k</i> nearest neighbours (the cell
         itself not counted), the share found in both graphs. Modules store different numbers of
         neighbours (scanpy keeps 14 on its exact path but 15 on its approximate one for
         <code>n_neighbors=15</code>), so <i>k</i> is the smaller of the two; the table shows both. <code>knn</code> pairs
         share their PCA input, so they show the kNN step's own effect; <code>pca</code> pairs use
         the same kNN module on different PCA outputs, so they show what PCA differences carry
-        into the graph. The table adds the share of cells whose neighbour sets are identical.""",
+        into the graph. The table gives min, median and max per group, plus the share of cells whose neighbour
+        sets are identical; every pair is in the TSV.""",
     "ari": """Each point is one pair of Leiden clusterings of the same cells, measured by the
         adjusted Rand index (ARI; 1 = identical partitions, about 0 = chance), grouped by what
         differs between the two pipelines. The line is the median. A stage whose pairs fall
         inside the spread of the <code>seed: …</code> pairs changes the clustering no more than
         re-running with another seed. A seed varied upstream (<code>seed: pca</code>) shows how
         that stage's noise carries through to the clusters.""",
-    "truth": """ARI of each pipeline's clustering against the annotated cell types, one marker
-        per annotation column in the truth file. The number of clusters at a fixed resolution
+    "truth": """ARI of each pipeline's clustering against the annotated cell types: one row per
+        pipeline with all its seeds together, one point per run, one marker per annotation column
+        in the truth file. The number of clusters at a fixed resolution
         usually differs from the number of annotated types, which keeps the ARI below 1 for
         every pipeline: compare pipelines with each other, not with 1. The table gives the
-        number of clusters and the ARI per size; NMI is in the TSV.""",
+        number of runs and the median number of clusters and ARI per size; NMI and every run
+        are in the TSV.""",
     "scaling": """Median agreement per group against the number of cells: kNN shared-neighbour
         fraction (left) and ARI between clusterings (right). Shows whether disagreement grows
         with dataset size.""",
@@ -92,6 +100,14 @@ def compute(df):
     """All summary tables, one dataset size at a time to keep memory bounded."""
     t = {k: [] for k in ("pca_curves", "pca_angles", "knn", "ari", "truth")}
     n_cells = {}
+    variants = seed_variants(df)
+
+    def pairs(rows):
+        for i, j in itertools.combinations(range(len(rows)), 2):
+            a, b = rows.iloc[i], rows.iloc[j]
+            if comparable(a["nodes"], b["nodes"], variants):
+                yield i, j, a, b
+
     for size, g in df.groupby("size"):
         order = _cell_order(g)
         n_cells[size] = len(order)
@@ -99,8 +115,7 @@ def compute(df):
 
         emb = [cc.read_embedding(p).reindex(order) for p in by["embedding_tsv"]["path"]]
         _check_complete(emb, by["embedding_tsv"])
-        for i, j in itertools.combinations(range(len(emb)), 2):
-            a, b = by["embedding_tsv"].iloc[i], by["embedding_tsv"].iloc[j]
+        for i, j, a, b in pairs(by["embedding_tsv"]):
             pair, cat = f"{a['label']}  vs  {b['label']}", pair_category(a["nodes"], b["nodes"])
             t["pca_curves"].append({"size": size, "pair": pair, "category": cat,
                                     "values": cc.pca_one_minus_abs_cos(emb[i], emb[j])})
@@ -115,8 +130,7 @@ def compute(df):
         for p in by["neighbors_h5"]["path"]:
             d, cells = cc.read_neighbors(p)
             graphs.append(cc.align_graph(d, cells, order))
-        for i, j in itertools.combinations(range(len(graphs)), 2):
-            a, b = by["neighbors_h5"].iloc[i], by["neighbors_h5"].iloc[j]
+        for i, j, a, b in pairs(by["neighbors_h5"]):
             ka, kb = cc.neighbours_per_cell(graphs[i]), cc.neighbours_per_cell(graphs[j])
             frac = cc.knn_shared_fraction(graphs[i], graphs[j], k=min(ka, kb))
             t["knn"].append({"size": size, "pair": f"{a['label']}  vs  {b['label']}",
@@ -128,8 +142,7 @@ def compute(df):
 
         labels = [cc.read_clusters(p).reindex(order) for p in by["clusters_tsv"]["path"]]
         _check_complete(labels, by["clusters_tsv"])
-        for i, j in itertools.combinations(range(len(labels)), 2):
-            a, b = by["clusters_tsv"].iloc[i], by["clusters_tsv"].iloc[j]
+        for i, j, a, b in pairs(by["clusters_tsv"]):
             t["ari"].append({"size": size, "a": a["label"], "b": b["label"],
                              "category": pair_category(a["nodes"], b["nodes"]),
                              "ari": cc.ari(labels[i], labels[j])})
@@ -137,7 +150,8 @@ def compute(df):
             truth = cc.read_truth(by["rawdata_clusters_truth"]["path"].iloc[0]).reindex(order)
             for lab, (_, r) in zip(labels, by["clusters_tsv"].iterrows()):
                 for col in truth.columns:
-                    t["truth"].append({"size": size, "pipeline": r["label"], "column": col,
+                    t["truth"].append({"size": size, "pipeline": _no_seed(r["label"]), "run": r["label"],
+                                       "column": col,
                                        "ari": cc.ari(truth[col], lab), "nmi": cc.nmi(truth[col], lab),
                                        "clusters": lab.nunique(), "annotated types": truth[col].nunique()})
 
@@ -146,6 +160,23 @@ def compute(df):
         if len(tables[k]) == 0:
             tables[k] = pd.DataFrame(columns=["size", "category"])
     return tables, n_cells
+
+
+def _no_seed(label):
+    """Pipeline label without its [seed] tags: all seeds of one pipeline together."""
+    return re.sub(r"\[[^\]]*\]", "", label)
+
+
+def summarise(table, value_cols, extra=None):
+    """Per size and category: number of pairs and min / median / max of each value."""
+    if not len(table) or "category" not in table:
+        return table
+    agg = {"pairs": (value_cols[0], "count")}
+    for c in value_cols:
+        agg.update({f"{c} min": (c, "min"), f"{c} median": (c, "median"), f"{c} max": (c, "max")})
+    for name, (col, fn) in (extra or {}).items():
+        agg[name] = (col, fn)
+    return table.groupby(["size", "category"]).agg(**agg).reset_index()
 
 
 def _cell_order(g):
@@ -185,16 +216,20 @@ def table_html(df, floatfmt="{:.4g}", fold_above=20, summary="Table"):
 
 
 def truth_wide(truth, sizes):
-    """One row per pipeline: clusters and ARI per annotation column, per size."""
-    w = truth.pivot_table(index="pipeline", columns=["size", "column"], values="ari")
-    k = truth.pivot_table(index="pipeline", columns="size", values="clusters")
+    """One row per pipeline (all its seeds together): runs, median clusters and median ARI
+    per annotation column, per size."""
+    w = truth.pivot_table(index="pipeline", columns=["size", "column"], values="ari", aggfunc="median")
+    k = truth.pivot_table(index="pipeline", columns="size", values="clusters", aggfunc="median")
+    n = truth.pivot_table(index="pipeline", columns="size", values="run", aggfunc="nunique")
     cols = {}
     for s in sizes:
+        if s in n:
+            cols[f"{s}: runs"] = n[s]
         if s in k:
-            cols[f"{s}: clusters"] = k[s]
+            cols[f"{s}: clusters (median)"] = k[s]
         for c in sorted(truth["column"].unique()):
             if (s, c) in w:
-                cols[f"{s}: ARI {c}"] = w[(s, c)]
+                cols[f"{s}: ARI {c} (median)"] = w[(s, c)]
     return pd.DataFrame(cols).reset_index()
 
 
@@ -223,16 +258,22 @@ def render(df, tables, n_cells, source):
     if len(tables["pca_curves"]):
         parts.append(section("3. PCA: component agreement", "pca",
                              fig_html(fg.pca_components(tables["pca_curves"], sizes))
-                             + table_html(tables["pca_angles"])))
+                             + table_html(summarise(tables["pca_angles"],
+                                                    [c for c in tables["pca_angles"] if "angle" in c]))))
     if len(tables["knn"]) and "pair" in tables["knn"]:
         parts.append(section("4. kNN: neighbour agreement", "knn",
-                             fig_html(fg.knn_pairs(tables["knn"], sizes))
-                             + table_html(tables["knn"], summary="All pairs"), floor_note))
+                             fig_html(fg.by_category(tables["knn"], sizes, "mean_shared",
+                                                     "mean shared-neighbour fraction (line = median)"))
+                             + table_html(summarise(tables["knn"], ["mean_shared", "cells_identical"],
+                                                    {"neighbours stored": ("neighbours stored",
+                                                                           lambda s: ", ".join(sorted(set(s))))})),
+                             floor_note))
     if len(tables["ari"]) and "ari" in tables["ari"]:
         summary = (tables["ari"].groupby(["size", "category"])["ari"]
                    .agg(pairs="count", min="min", median="median", max="max").reset_index())
         parts.append(section("5. Leiden: agreement between runs", "ari",
-                             fig_html(fg.ari_by_category(tables["ari"], sizes))
+                             fig_html(fg.by_category(tables["ari"], sizes, "ari",
+                                                     "ARI between runs (1 = identical; line = median)"))
                              + table_html(summary), floor_note))
     if len(tables["truth"]):
         parts.append(section("6. Leiden: agreement with the annotation", "truth",
