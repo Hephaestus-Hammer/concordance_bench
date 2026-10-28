@@ -1,5 +1,8 @@
 """Concordance report: every metric and figure from one run of the plan, in one HTML file.
 
+The page has tabs per stage and filters for dataset size and for figures, tables
+and descriptions, so only what is selected is shown.
+
 By hand, on the ob output tree:
 
     pixi run report                         # = python analysis/report.py --from_out out
@@ -233,9 +236,31 @@ def truth_wide(truth, sizes):
     return pd.DataFrame(cols).reset_index()
 
 
-def section(title, key, body, note=None):
-    n = f"<p class='note'>{html.escape(note)}</p>" if note else ""
-    return f"<section><h2>{title}</h2><p class='desc'>{DESCRIPTIONS[key]}</p>{n}{body}</section>"
+STAGES = [  # (id, tab label, title)
+    ("overview", "Overview", "Runs found and how pairs are labelled"),
+    ("pca", "PCA", "PCA: component agreement"),
+    ("knn", "kNN", "kNN: neighbour agreement"),
+    ("ari", "Leiden", "Leiden: agreement between runs"),
+    ("truth", "Annotation", "Leiden: agreement with the annotation"),
+    ("scaling", "Scaling", "Scaling with dataset size"),
+]
+
+
+def _block(kind, body, size=None):
+    s = f' data-size="{html.escape(size)}"' if size else ""
+    return f'<div class="blk" data-kind="{kind}"{s}>{body}</div>'
+
+
+def _per_size(sizes, n_cells, make_fig, make_table):
+    """One figure and one table per dataset size, each tagged for the size filter."""
+    out = []
+    for size in sizes:
+        fig, tab = make_fig(size), make_table(size)
+        out.append(f'<div class="size" data-size="{html.escape(size)}">'
+                   f'<h3>{html.escape(size)} <span class="cells">{n_cells[size]:,} cells</span></h3>'
+                   + (_block("figure", fig_html(fig)) if fig is not None else "")
+                   + _block("table", table_html(tab)) + "</div>")
+    return "".join(out)
 
 
 def render(df, tables, n_cells, source):
@@ -249,39 +274,59 @@ def render(df, tables, n_cells, source):
                  | (tables["ari"]["category"] == "replicate")).any()
     floor_note = None if has_floor else (
         "No seed or replicate pairs in this run, so there is no noise floor yet: "
-        "differences below cannot be compared with seed noise.")
+        "differences cannot be compared with seed noise.")
 
-    parts = [section("1. Runs found", "runs",
-                     table_html(counts) + "<h3>Missing combinations</h3>" + table_html(miss)),
-             f"<section><h2>2. How pairs are labelled</h2><p class='desc'>{DESCRIPTIONS['labels']}</p></section>"]
+    def at(t, size):
+        return t[t["size"] == size] if len(t) and "size" in t else t
+
+    body = {"overview": _block("desc", f"<p class='desc'>{DESCRIPTIONS['runs']}</p>")
+            + _block("table", table_html(counts) + "<h3>Missing combinations</h3>" + table_html(miss))
+            + _block("desc", f"<h3>How pairs are labelled</h3><p class='desc'>{DESCRIPTIONS['labels']}</p>")}
+    notes = {}
 
     if len(tables["pca_curves"]):
-        parts.append(section("3. PCA: component agreement", "pca",
-                             fig_html(fg.pca_components(tables["pca_curves"], sizes))
-                             + table_html(summarise(tables["pca_angles"],
-                                                    [c for c in tables["pca_angles"] if "angle" in c]))))
+        angles = [c for c in tables["pca_angles"] if "angle" in c]
+        body["pca"] = _per_size(
+            sizes, n_cells,
+            lambda s: fg.pca_components(at(tables["pca_curves"], s), [s]) if len(at(tables["pca_curves"], s)) else None,
+            lambda s: summarise(at(tables["pca_angles"], s), angles))
     if len(tables["knn"]) and "pair" in tables["knn"]:
-        parts.append(section("4. kNN: neighbour agreement", "knn",
-                             fig_html(fg.by_category(tables["knn"], sizes, "mean_shared",
-                                                     "mean shared-neighbour fraction (line = median)"))
-                             + table_html(summarise(tables["knn"], ["mean_shared", "cells_identical"],
-                                                    {"neighbours stored": ("neighbours stored",
-                                                                           lambda s: ", ".join(sorted(set(s))))})),
-                             floor_note))
+        stored = {"neighbours stored": ("neighbours stored", lambda x: ", ".join(sorted(set(x))))}
+        body["knn"] = _per_size(
+            sizes, n_cells,
+            lambda s: fg.by_category(at(tables["knn"], s), [s], "mean_shared",
+                                     "mean shared-neighbour fraction (line = median)") if len(at(tables["knn"], s)) else None,
+            lambda s: summarise(at(tables["knn"], s), ["mean_shared", "cells_identical"], stored))
+        notes["knn"] = floor_note
     if len(tables["ari"]) and "ari" in tables["ari"]:
-        summary = (tables["ari"].groupby(["size", "category"])["ari"]
-                   .agg(pairs="count", min="min", median="median", max="max").reset_index())
-        parts.append(section("5. Leiden: agreement between runs", "ari",
-                             fig_html(fg.by_category(tables["ari"], sizes, "ari",
-                                                     "ARI between runs (1 = identical; line = median)"))
-                             + table_html(summary), floor_note))
+        body["ari"] = _per_size(
+            sizes, n_cells,
+            lambda s: fg.by_category(at(tables["ari"], s), [s], "ari",
+                                     "ARI between runs (1 = identical; line = median)") if len(at(tables["ari"], s)) else None,
+            lambda s: summarise(at(tables["ari"], s), ["ari"]))
+        notes["ari"] = floor_note
     if len(tables["truth"]):
-        parts.append(section("6. Leiden: agreement with the annotation", "truth",
-                             fig_html(fg.truth_ari(tables["truth"], sizes))
-                             + table_html(truth_wide(tables["truth"], sizes), summary="Per pipeline")))
+        body["truth"] = _per_size(
+            sizes, n_cells,
+            lambda s: fg.truth_ari(at(tables["truth"], s), [s]) if len(at(tables["truth"], s)) else None,
+            lambda s: truth_wide(at(tables["truth"], s), [s]))
     if len(sizes) > 1 and (len(tables["ari"]) or len(tables["knn"])):
-        parts.append(section("7. Scaling with dataset size", "scaling",
-                             fig_html(fg.scaling(tables["ari"], tables["knn"], n_cells))))
+        body["scaling"] = (_block("figure", fig_html(fg.scaling(tables["ari"], tables["knn"], n_cells)))
+                           + "<p class='note'>This figure always shows every dataset size.</p>")
+
+    stages = [s for s in STAGES if s[0] in body]
+    tabs = "".join(f'<button type="button" class="tab" data-stage="{sid}" aria-pressed="false">{lab}</button>'
+                   for sid, lab, _ in stages)
+    size_boxes = "".join(f'<label class="pill"><input type="checkbox" name="size" value="{html.escape(s)}" checked> '
+                         f'{html.escape(s)}</label>' for s in sizes)
+    kind_boxes = "".join(f'<label class="pill"><input type="checkbox" name="kind" value="{k}" checked> {lab}</label>'
+                         for k, lab in (("figure", "Figures"), ("table", "Tables"), ("desc", "Descriptions")))
+    sections = []
+    for sid, _, title in stages:
+        desc = "" if sid == "overview" else _block("desc", f"<p class='desc'>{DESCRIPTIONS[sid]}</p>")
+        note = f"<p class='note'>{html.escape(notes[sid])}</p>" if notes.get(sid) else ""
+        sections.append(f'<section class="stage" data-stage="{sid}"><h2>{title}</h2>{desc}{note}{body[sid]}'
+                        f'<p class="empty note" hidden>No dataset selected.</p></section>')
 
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     return f"""<!doctype html>
@@ -289,24 +334,70 @@ def render(df, tables, n_cells, source):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Concordance report</title>
 <style>
-  :root {{ --ink:#0b0b0b; --ink2:#52514e; --line:#e4e3df; --bg:#fcfcfb; --note:#fff4e5; }}
+  :root {{ --ink:#0b0b0b; --ink2:#52514e; --line:#e4e3df; --bg:#fcfcfb; --note:#fff4e5; --acc:#2a78d6; }}
   body {{ background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,sans-serif;
          max-width:1100px; margin:0 auto; padding:24px 16px 64px; }}
-  h1 {{ font-size:1.6rem; margin:0 0 4px; }} h2 {{ font-size:1.2rem; margin:40px 0 6px; }}
-  h3 {{ font-size:1rem; margin:20px 0 6px; }}
-  .meta {{ color:var(--ink2); font-size:.9rem; }} .desc {{ max-width:75ch; }}
+  h1 {{ font-size:1.6rem; margin:0 0 4px; }} h2 {{ font-size:1.2rem; margin:24px 0 6px; }}
+  h3 {{ font-size:1rem; margin:24px 0 4px; }} .cells {{ color:var(--ink2); font-weight:400; font-size:.85rem; }}
+  .meta {{ color:var(--ink2); font-size:.9rem; margin:0 0 12px; }} .desc {{ max-width:75ch; }}
   .note {{ background:var(--note); padding:6px 10px; border-radius:4px; max-width:75ch; font-size:.9rem; }}
-  img {{ max-width:100%; height:auto; display:block; margin:12px 0; }}
+  .bar {{ position:sticky; top:0; z-index:2; background:var(--bg); border-bottom:1px solid var(--line);
+         padding:10px 0; display:flex; flex-direction:column; gap:8px; }}
+  .row {{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; }}
+  .row > span {{ color:var(--ink2); font-size:.8rem; width:5.5em; }}
+  .tab {{ font:inherit; font-size:.9rem; padding:4px 12px; border:1px solid var(--line); border-radius:6px;
+         background:#fff; color:var(--ink); cursor:pointer; }}
+  .tab[aria-pressed="true"] {{ background:var(--acc); border-color:var(--acc); color:#fff; }}
+  .pill {{ font-size:.85rem; padding:2px 10px; border:1px solid var(--line); border-radius:999px;
+          background:#fff; cursor:pointer; user-select:none; }}
+  .pill input {{ margin:0 4px 0 0; vertical-align:-1px; }}
+  img {{ max-width:100%; height:auto; display:block; margin:8px 0; }}
   table.t {{ border-collapse:collapse; font-size:.8rem; margin:8px 0; display:block; overflow-x:auto; }}
   table.t th, table.t td {{ padding:3px 8px; border-bottom:1px solid var(--line); text-align:left; }}
   table.t td:first-child, table.t td:nth-child(2) {{ white-space:nowrap; }}
-  code {{ font-size:.85em; }}
-  summary {{ cursor:pointer; color:var(--ink2); font-size:.9rem; margin:8px 0; }}
+  code {{ font-size:.85em; }} summary {{ cursor:pointer; color:var(--ink2); font-size:.9rem; margin:8px 0; }}
+  [hidden] {{ display:none !important; }}
 </style></head><body>
 <h1>Concordance report</h1>
-<p class="meta">Generated {stamp} from {html.escape(source)}: {len(df)} output files,
-{len(sizes)} dataset size(s).</p>
-{''.join(parts)}
+<p class="meta">Generated {stamp} from {html.escape(source)}: {len(df)} output files, {len(sizes)} dataset size(s).</p>
+<div class="bar">
+  <div class="row"><span>Stage</span>{tabs}</div>
+  <div class="row"><span>Datasets</span>{size_boxes}</div>
+  <div class="row"><span>Show</span>{kind_boxes}</div>
+</div>
+{''.join(sections)}
+<script>
+(function () {{
+  const KEY = "concordance-report-view";
+  const tabs = [...document.querySelectorAll(".tab")];
+  const boxes = name => [...document.querySelectorAll(`input[name="${{name}}"]`)];
+  let state = {{ stage: tabs.length ? tabs[0].dataset.stage : null }};
+  try {{
+    const saved = JSON.parse(localStorage.getItem(KEY) || "null");
+    if (saved) {{
+      if (tabs.some(t => t.dataset.stage === saved.stage)) state.stage = saved.stage;
+      for (const name of ["size", "kind"])
+        if (Array.isArray(saved[name])) boxes(name).forEach(b => b.checked = saved[name].includes(b.value));
+    }}
+  }} catch (e) {{}}
+  function apply() {{
+    const sizes = boxes("size").filter(b => b.checked).map(b => b.value);
+    const kinds = boxes("kind").filter(b => b.checked).map(b => b.value);
+    tabs.forEach(t => t.setAttribute("aria-pressed", String(t.dataset.stage === state.stage)));
+    document.querySelectorAll("section.stage").forEach(sec => {{
+      sec.hidden = sec.dataset.stage !== state.stage;
+      const perSize = sec.querySelectorAll(".size");
+      perSize.forEach(d => d.hidden = !sizes.includes(d.dataset.size));
+      sec.querySelector(".empty").hidden = !(perSize.length && sizes.length === 0);
+    }});
+    document.querySelectorAll(".blk").forEach(b => b.hidden = !kinds.includes(b.dataset.kind));
+    try {{ localStorage.setItem(KEY, JSON.stringify({{ stage: state.stage, size: sizes, kind: kinds }})); }} catch (e) {{}}
+  }}
+  tabs.forEach(t => t.addEventListener("click", () => {{ state.stage = t.dataset.stage; apply(); }}));
+  document.querySelectorAll(".bar input").forEach(b => b.addEventListener("change", apply));
+  apply();
+}})();
+</script>
 </body></html>"""
 
 

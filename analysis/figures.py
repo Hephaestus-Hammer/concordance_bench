@@ -58,7 +58,7 @@ def pca_components(curves, sizes):
 
     One line per category: the median over its pairs, with the range shaded.
     """
-    fig, axes = _panels(len(sizes))
+    fig, axes = _panels(len(sizes), width=7.0 if len(sizes) == 1 else 4.2)
     for ax, size in zip(axes, sizes):
         sub = curves[curves["size"] == size]
         for cat in categories_in(sub["category"]):
@@ -102,7 +102,7 @@ def truth_ari(truth, sizes):
     pipelines = sorted(truth["pipeline"].unique())
     cols = sorted(truth["column"].unique())
     markers = ["o", "s", "^", "D"]
-    fig, axes = _panels(len(sizes), width=5.2, height=0.3 * len(pipelines) + 1.6)
+    fig, axes = _panels(len(sizes), width=7.0 if len(sizes) == 1 else 5.2, height=0.3 * len(pipelines) + 1.6)
     y_of = {p: i for i, p in enumerate(pipelines)}
     for ax, size in zip(axes, sizes):
         sub = truth[truth["size"] == size]
