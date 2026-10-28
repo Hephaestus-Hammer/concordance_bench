@@ -118,6 +118,13 @@ def compute(df):
 
         emb = [cc.read_embedding(p).reindex(order) for p in by["embedding_tsv"]["path"]]
         _check_complete(emb, by["embedding_tsv"])
+        basis = {}  # (embedding, k) -> orthonormal basis, computed once
+
+        def q(i, k):
+            if (i, k) not in basis:
+                basis[(i, k)] = cc.pca_basis(emb[i], k)
+            return basis[(i, k)]
+
         for i, j, a, b in pairs(by["embedding_tsv"]):
             pair, cat = f"{a['label']}  vs  {b['label']}", pair_category(a["nodes"], b["nodes"])
             t["pca_curves"].append({"size": size, "pair": pair, "category": cat,
@@ -125,38 +132,50 @@ def compute(df):
             row = {"size": size, "pair": pair, "category": cat}
             for k in (10, 20, 50):
                 if k <= min(emb[i].shape[1], emb[j].shape[1]):
-                    row[f"max angle, first {k} PCs (deg)"] = cc.pca_max_angle(emb[i], emb[j], k)
+                    row[f"max angle, first {k} PCs (deg)"] = cc.pca_max_angle(None, None, qa=q(i, k), qb=q(j, k))
             t["pca_angles"].append(row)
-        del emb
+        del emb, basis
 
         graphs = []
         for p in by["neighbors_h5"]["path"]:
             d, cells = cc.read_neighbors(p)
             graphs.append(cc.align_graph(d, cells, order))
+        stored = [cc.neighbours_per_cell(d) for d in graphs]
+        near = {}  # (graph, k) -> its k nearest neighbours, computed once
+
+        def nn(i, k):
+            if (i, k) not in near:
+                near[(i, k)] = cc.nearest(graphs[i], k)
+            return near[(i, k)]
+
         for i, j, a, b in pairs(by["neighbors_h5"]):
-            ka, kb = cc.neighbours_per_cell(graphs[i]), cc.neighbours_per_cell(graphs[j])
-            frac = cc.knn_shared_fraction(graphs[i], graphs[j], k=min(ka, kb))
+            ka, kb = stored[i], stored[j]
+            k = min(ka, kb)
+            frac = cc.knn_shared_fraction(graphs[i], graphs[j], k=k, n1=nn(i, k), n2=nn(j, k))
             t["knn"].append({"size": size, "pair": f"{a['label']}  vs  {b['label']}",
                              "category": pair_category(a["nodes"], b["nodes"]),
                              "neighbours stored": f"{ka} / {kb}", "k compared": min(ka, kb),
                              "mean_shared": float(frac.mean()),
                              "cells_identical": float((frac == 1).mean())})
-        del graphs
+        del graphs, near
 
         labels = [cc.read_clusters(p).reindex(order) for p in by["clusters_tsv"]["path"]]
         _check_complete(labels, by["clusters_tsv"])
+        n_clusters = [lab.nunique() for lab in labels]
+        labels = [cc.codes(lab) for lab in labels]  # integer codes: fast ARI
         for i, j, a, b in pairs(by["clusters_tsv"]):
             t["ari"].append({"size": size, "a": a["label"], "b": b["label"],
                              "category": pair_category(a["nodes"], b["nodes"]),
                              "ari": cc.ari(labels[i], labels[j])})
         if len(by["rawdata_clusters_truth"]):
             truth = cc.read_truth(by["rawdata_clusters_truth"]["path"].iloc[0]).reindex(order)
-            for lab, (_, r) in zip(labels, by["clusters_tsv"].iterrows()):
+            truth_codes = {col: cc.codes(truth[col]) for col in truth.columns}
+            for lab, nclu, (_, r) in zip(labels, n_clusters, by["clusters_tsv"].iterrows()):
                 for col in truth.columns:
                     t["truth"].append({"size": size, "pipeline": _no_seed(r["label"]), "run": r["label"],
                                        "column": col,
-                                       "ari": cc.ari(truth[col], lab), "nmi": cc.nmi(truth[col], lab),
-                                       "clusters": lab.nunique(), "annotated types": truth[col].nunique()})
+                                       "ari": cc.ari(truth_codes[col], lab), "nmi": cc.nmi(truth_codes[col], lab),
+                                       "clusters": nclu, "annotated types": truth[col].nunique()})
 
     tables = {k: pd.DataFrame(v) for k, v in t.items()}
     for k in ("knn", "ari", "pca_angles"):
