@@ -33,6 +33,7 @@ import pandas as pd
 
 import concordance as cc
 import figures as fg
+import resources as rs
 from load import OUTPUTS, comparable, find, index, missing, pair_category, seed_variants
 
 DESCRIPTIONS = {
@@ -81,6 +82,22 @@ DESCRIPTIONS = {
         every pipeline: compare pipelines with each other, not with 1. The table gives the
         number of runs and the median number of clusters and ARI per size; NMI and every run
         are in the TSV.""",
+    "runtime": """How long each job took, how many cores it kept busy and how much memory it used.
+        Where a job ran under denet (the <code>stage</code> entrypoint) the numbers come from
+        its trace, sampled every 0.1&ndash;1&nbsp;s: wall time, mean cores used (CPU time / wall time),
+        peak cores used (the busiest sample), peak memory, peak threads and, for GPU modules, GPU
+        utilisation and the job's GPU memory. Jobs without a trace fall back to Snakemake's benchmark
+        file, which samples every 30&nbsp;s after the first 15&nbsp;s, so their CPU time and memory are lower
+        bounds and they have no peak cores; the table says which source each row uses. All of it covers
+        the whole module call, including Python start-up, imports and reading and writing files;
+        every job is a fresh process, so one-off costs such as numba compiling pynndescent (around
+        10&nbsp;s) are in every scanpy kNN job. GPU memory is the job's own where NVML reports it,
+        otherwise the whole device's. The dashed line
+        is the cores the stage gets in <code>benchmark.yaml</code>: a mean well below it with a peak near it
+        means short multi-threaded bursts; a peak above it means the module starts more threads than it
+        was given. The traces below show cores over time, one line per job, so runs that finish early
+        (e.g. a kNN search that converges quickly) stand out. Jobs that ran side by side on one node
+        compete for cores and memory bandwidth, so compare timings from the same kind of run.""",
     "scaling": """Median agreement per group against the number of cells: kNN shared-neighbour
         fraction (left) and ARI between clusterings (right). Shows whether disagreement grows
         with dataset size.""",
@@ -92,6 +109,8 @@ def parse_args():
     p.add_argument("--output_dir", type=Path, default=Path("results/report"))
     p.add_argument("--name", default="concordance")
     p.add_argument("--from_out", type=Path, help="find every output under this ob output tree")
+    p.add_argument("--plan", type=Path, default=Path("benchmark.yaml"),
+                   help="plan to read each stage's allocated cores from (optional)")
     for oid in OUTPUTS:
         p.add_argument(f"--{oid}", type=Path, nargs="+", default=[])
     return p.parse_args()
@@ -262,6 +281,7 @@ STAGES = [  # (id, tab label, title)
     ("ari", "Leiden", "Leiden: agreement between runs"),
     ("truth", "Annotation", "Leiden: agreement with the annotation"),
     ("scaling", "Scaling", "Scaling with dataset size"),
+    ("runtime", "Runtime", "Runtime and cores used per job"),
 ]
 
 
@@ -282,7 +302,7 @@ def _per_size(sizes, n_cells, make_fig, make_table):
     return "".join(out)
 
 
-def render(df, tables, n_cells, source):
+def render(df, tables, n_cells, source, rt=None, series=None):
     sizes = sorted(n_cells, key=n_cells.get)
     counts = (df.assign(stage=df["output"]).pivot_table(index="size", columns="stage", values="path",
                                                          aggfunc="count", fill_value=0)
@@ -333,6 +353,14 @@ def render(df, tables, n_cells, source):
         body["scaling"] = (_block("figure", fig_html(fg.scaling(tables["ari"], tables["knn"], n_cells)))
                            + "<p class='note'>This figure always shows every dataset size.</p>")
 
+    if rt is not None and len(rt):
+        body["runtime"] = _per_size(sizes, n_cells, lambda s: fg.runtime(rt, s),
+                                    lambda s: rs.summarise(rt[rt["size"] == s]))
+        if series:
+            body["runtime"] += "<h3>Cores used over time</h3>" + "".join(
+                f'<div class="size" data-size="{html.escape(s)}"><h3>{html.escape(s)}</h3>'
+                + _block("figure", fig_html(f)) + "</div>"
+                for s in sizes if (f := fg.runtime_traces(series, rt, s)) is not None)
     stages = [s for s in STAGES if s[0] in body]
     tabs = "".join(f'<button type="button" class="tab" data-stage="{sid}" aria-pressed="false">{lab}</button>'
                    for sid, lab, _ in stages)
@@ -427,11 +455,15 @@ def main():
         raise SystemExit("no outputs found: give --from_out or the per-output flags")
     df = index(files)
     tables, n_cells = compute(df)
+    rt, series = rs.runtimes(df)
+    rt = rs.add_cores(rt, rs.allocated_cores(args.plan))
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     source = str(args.from_out) if args.from_out else "gathered files"
     out = args.output_dir / f"{args.name}_report.html"
-    out.write_text(render(df, tables, n_cells, source))
+    out.write_text(render(df, tables, n_cells, source, rt, series))
+    if len(rt):
+        rt.to_csv(args.output_dir / f"{args.name}_runtime.tsv", sep="\t", index=False)
     for k, t in tables.items():
         if k != "pca_curves" and len(t):
             t.to_csv(args.output_dir / f"{args.name}_{k}.tsv", sep="\t", index=False)

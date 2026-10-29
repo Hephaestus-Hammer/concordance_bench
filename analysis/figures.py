@@ -118,6 +118,84 @@ def truth_ari(truth, sizes):
     return fig
 
 
+def _module_colour(m, cache={}):
+    if m not in cache:
+        cache[m] = _EXTRA[len(cache) % len(_EXTRA)]
+    return cache[m]
+
+
+def runtime(rt, size):
+    """Per stage (columns): wall time, mean and peak cores used, GPU utilisation (rows, when
+    measured) per module; one point per job, line = median, dashed = cores allocated."""
+    sub = rt[rt["size"] == size]
+    stages = [s for s in ("pca", "knn", "cluster") if s in set(sub["stage"])]
+    if not stages:
+        return None
+    rows = [("s", "wall time (s, log)", True, False), ("cores used", "mean cores used", False, True)]
+    if sub["peak_cores"].notna().any():
+        rows.append(("peak_cores", "peak cores used", False, True))
+    if sub["gpu_util_mean"].notna().any():
+        rows.append(("gpu_util_mean", "GPU utilisation (%, mean)", False, False))
+    widths = [max(1, sub.loc[sub["stage"] == s, "module"].nunique()) for s in stages]
+    fig, axes = plt.subplots(len(rows), len(stages), figsize=(max(6.5, 1.3 * sum(widths) + 1.5), 2.6 * len(rows)),
+                             squeeze=False, constrained_layout=True, gridspec_kw={"width_ratios": widths})
+    rng = np.random.default_rng(0)  # jitter only
+    for j, stage in enumerate(stages):
+        s = sub[sub["stage"] == stage]
+        mods = sorted(s["module"].unique())
+        for i, (col, label, log, alloc_line) in enumerate(rows):
+            ax = axes[i, j]
+            for x, m in enumerate(mods):
+                v = s.loc[s["module"] == m, col].to_numpy(dtype=float)
+                v = v[~np.isnan(v)]
+                if len(v):
+                    ax.scatter(x + rng.uniform(-0.2, 0.2, len(v)), v, s=12, color=_module_colour(m),
+                               alpha=0.8, zorder=3)
+                    ax.hlines(np.median(v), x - 0.3, x + 0.3, color=INK, lw=1.4, zorder=4)
+            if alloc_line:
+                alloc = s["cores allocated"].dropna()
+                if len(alloc):
+                    ax.axhline(alloc.iloc[0], color=INK_2, ls="--", lw=1, zorder=2)
+                    ax.text(len(mods) - 0.5, alloc.iloc[0], " allocated", va="bottom", ha="right",
+                            fontsize=7, color=INK_2)
+            if not log:
+                ax.set_ylim(bottom=0)
+            ax.set_xticks(range(len(mods)), mods if i == len(rows) - 1 else [""] * len(mods),
+                          rotation=30, ha="right")
+            ax.set(xlim=(-0.6, len(mods) - 0.4), yscale="log" if log else "linear")
+            ax.grid(axis="x", visible=False)
+            if i == 0:
+                ax.set_title(stage)
+            if j == 0:
+                ax.set_ylabel(label)
+    return fig
+
+
+def runtime_traces(series, rt, size):
+    """Cores used over time, one line per job (denet traces), one panel per stage."""
+    keys = [k for k in series if k[0] == size]
+    stages = [s for s in ("pca", "knn", "cluster") if any(k[1] == s for k in keys)]
+    if not stages:
+        return None
+    module_of = {(r["stage"], r["pipeline"]): r["module"] for _, r in rt[rt["size"] == size].iterrows()}
+    fig, axes = _panels(len(stages), width=4.4, height=3.2)
+    for ax, stage in zip(axes, stages):
+        seen = set()
+        for (_, st, label) in [k for k in keys if k[1] == stage]:
+            d = series[(size, st, label)]
+            m = module_of.get((st, label), "?")
+            ax.plot(d["t"], d["cores"], color=_module_colour(m), lw=0.8, alpha=0.5,
+                    label=None if m in seen else m)
+            seen.add(m)
+        alloc = rt.loc[(rt["size"] == size) & (rt["stage"] == stage), "cores allocated"].dropna()
+        if len(alloc):
+            ax.axhline(alloc.iloc[0], color=INK_2, ls="--", lw=1)
+        ax.set(title=stage, xlabel="seconds since start", ylim=(0, None))
+        ax.legend(frameon=False, fontsize=7, loc="upper right")
+    axes[0].set_ylabel("cores used")
+    return fig
+
+
 def scaling(pairs, knn, n_cells):
     """Median agreement per category against the number of cells."""
     fig, axes = _panels(2, width=5.2)

@@ -102,7 +102,11 @@ pixi run report        # every metric and figure in one file: results/report/con
 ```
 
 The report also writes one TSV per table next to the HTML. It reads `out/` and
-never writes into it.
+never writes into it. Its Runtime tab shows per job: wall time, mean and peak
+cores used against the cores the stage is given, peak memory, GPU use, and cores
+over time. It reads each job's denet trace (`denet.jsonl`, see below) and falls
+back to the `performance.txt` ob writes next to every job; Snakemake samples that
+sparsely after a job's first 15 s, so its CPU time and memory are lower bounds.
 The data stage downloads from Hugging Face, so the host running it needs network
 access.
 
