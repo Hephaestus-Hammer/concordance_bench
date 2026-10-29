@@ -1,0 +1,18 @@
+# obfilter: seed noise of Leiden: 20 Leiden seeds on seed-0 PCA and kNN.
+# All sizes, CPU modules. `all` = seeds 0-19, `first` = seed 0.
+picks:
+  data:
+    hao2021_10k: all
+    hao2021_50k: all
+    hao2021_100k: all
+  input:
+    hao_input: all
+  pca:
+    pc-scanpy: first
+    pc-baseline: all
+  knn:
+    nn-scanpy: first
+    nn-baseline: all
+  cluster:
+    cl-scanpy: all
+    cl-baseline: all

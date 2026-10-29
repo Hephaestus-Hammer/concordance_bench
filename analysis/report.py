@@ -1,5 +1,8 @@
 """Concordance report: every metric and figure from one run of the plan, in one HTML file.
 
+The page has tabs per stage and filters for dataset size and for figures, tables
+and descriptions, so only what is selected is shown.
+
 By hand, on the ob output tree:
 
     pixi run report                         # = python analysis/report.py --from_out out
@@ -21,6 +24,7 @@ import base64
 import html
 import io
 import itertools
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -29,7 +33,7 @@ import pandas as pd
 
 import concordance as cc
 import figures as fg
-from load import OUTPUTS, find, index, missing, pair_category
+from load import OUTPUTS, comparable, find, index, missing, pair_category, seed_variants
 
 DESCRIPTIONS = {
     "runs": """What the report was built from: the number of output files per stage and
@@ -40,32 +44,43 @@ DESCRIPTIONS = {
     "labels": """Pipelines are named by their module ids from PCA on
         (<code>pc-… &gt; nn-… &gt; cl-…</code>). A pair of runs is grouped by <b>what differs</b>
         between them: the stages whose module or settings differ (<code>pca</code>,
-        <code>knn</code>, <code>pca+knn</code>, …), <code>seed</code> if only random seeds differ,
-        or <code>replicate</code> if only the input replicate differs. Seed and replicate pairs are
-        the noise floor; colours are the same in every figure.""",
-    "pca": """One line per pair of PCA runs on the same cells. The y-axis is 1&nbsp;&minus;&nbsp;|cos|
+        <code>knn</code>, <code>pca+knn</code>, …); <code>seed: &lt;stage&gt;</code> if only that
+        stage's random seed differs, which is that stage's noise floor; or <code>replicate</code>
+        if only the input replicate differs. Noise-floor groups are grey; colours are the same
+        in every figure. Only like-for-like pairs are compared: seed pairs differ in exactly one
+        stage's seed, and pairs that differ in a stage's settings have the same seeds everywhere
+        else (and at that stage too, when both modules ran several seeds), so a settings
+        difference is never mixed with seed noise.""",
+    "pca": """One line per group of pairs of PCA runs on the same cells: the median over the
+        pairs, with their range shaded. The y-axis is 1&nbsp;&minus;&nbsp;|cos|
         between the cell scores of matching components, on a log scale (zero is drawn at
         10<sup>&minus;16</sup>). |cos| ignores sign, which is arbitrary in PCA. Values near
         10<sup>&minus;16</sup> mean identical up to round-off; values near 1 mean the component
         points somewhere else. Late components with nearly equal variance can swap or mix
         without changing the subspace, so the table also gives the largest principal angle
         between the spans of the first <i>k</i> components, which is insensitive to that.""",
-    "knn": """Each point is a pair of kNN graphs on the same cells. The x-axis is the mean over
-        cells of the shared-neighbour fraction: neighbours found in both graphs divided by the
-        size of the larger neighbour set (the cell itself is not counted). <code>knn</code> pairs
+    "knn": """Each point is a pair of kNN graphs on the same cells. The y-axis is the mean over
+        cells of the shared-neighbour fraction: of each cell's <i>k</i> nearest neighbours (the cell
+        itself not counted), the share found in both graphs. Modules store different numbers of
+        neighbours (scanpy keeps 14 on its exact path but 15 on its approximate one for
+        <code>n_neighbors=15</code>), so <i>k</i> is the smaller of the two; the table shows both. <code>knn</code> pairs
         share their PCA input, so they show the kNN step's own effect; <code>pca</code> pairs use
         the same kNN module on different PCA outputs, so they show what PCA differences carry
-        into the graph. The table adds the share of cells whose neighbour sets are identical.""",
+        into the graph. The table gives min, median and max per group, plus the share of cells whose neighbour
+        sets are identical; every pair is in the TSV.""",
     "ari": """Each point is one pair of Leiden clusterings of the same cells, measured by the
         adjusted Rand index (ARI; 1 = identical partitions, about 0 = chance), grouped by what
         differs between the two pipelines. The line is the median. A stage whose pairs fall
-        inside the spread of the <code>seed</code> pairs changes the clustering no more than
-        re-running with another seed.""",
-    "truth": """ARI of each pipeline's clustering against the annotated cell types, one marker
-        per annotation column in the truth file. The number of clusters at a fixed resolution
+        inside the spread of the <code>seed: …</code> pairs changes the clustering no more than
+        re-running with another seed. A seed varied upstream (<code>seed: pca</code>) shows how
+        that stage's noise carries through to the clusters.""",
+    "truth": """ARI of each pipeline's clustering against the annotated cell types: one row per
+        pipeline with all its seeds together, one point per run, one marker per annotation column
+        in the truth file. The number of clusters at a fixed resolution
         usually differs from the number of annotated types, which keeps the ARI below 1 for
         every pipeline: compare pipelines with each other, not with 1. The table gives the
-        number of clusters and the ARI per size; NMI is in the TSV.""",
+        number of runs and the median number of clusters and ARI per size; NMI and every run
+        are in the TSV.""",
     "scaling": """Median agreement per group against the number of cells: kNN shared-neighbour
         fraction (left) and ARI between clusterings (right). Shows whether disagreement grows
         with dataset size.""",
@@ -88,6 +103,14 @@ def compute(df):
     """All summary tables, one dataset size at a time to keep memory bounded."""
     t = {k: [] for k in ("pca_curves", "pca_angles", "knn", "ari", "truth")}
     n_cells = {}
+    variants = seed_variants(df)
+
+    def pairs(rows):
+        for i, j in itertools.combinations(range(len(rows)), 2):
+            a, b = rows.iloc[i], rows.iloc[j]
+            if comparable(a["nodes"], b["nodes"], variants):
+                yield i, j, a, b
+
     for size, g in df.groupby("size"):
         order = _cell_order(g)
         n_cells[size] = len(order)
@@ -95,51 +118,87 @@ def compute(df):
 
         emb = [cc.read_embedding(p).reindex(order) for p in by["embedding_tsv"]["path"]]
         _check_complete(emb, by["embedding_tsv"])
-        for i, j in itertools.combinations(range(len(emb)), 2):
-            a, b = by["embedding_tsv"].iloc[i], by["embedding_tsv"].iloc[j]
+        basis = {}  # (embedding, k) -> orthonormal basis, computed once
+
+        def q(i, k):
+            if (i, k) not in basis:
+                basis[(i, k)] = cc.pca_basis(emb[i], k)
+            return basis[(i, k)]
+
+        for i, j, a, b in pairs(by["embedding_tsv"]):
             pair, cat = f"{a['label']}  vs  {b['label']}", pair_category(a["nodes"], b["nodes"])
             t["pca_curves"].append({"size": size, "pair": pair, "category": cat,
                                     "values": cc.pca_one_minus_abs_cos(emb[i], emb[j])})
             row = {"size": size, "pair": pair, "category": cat}
             for k in (10, 20, 50):
                 if k <= min(emb[i].shape[1], emb[j].shape[1]):
-                    row[f"max angle, first {k} PCs (deg)"] = cc.pca_max_angle(emb[i], emb[j], k)
+                    row[f"max angle, first {k} PCs (deg)"] = cc.pca_max_angle(None, None, qa=q(i, k), qb=q(j, k))
             t["pca_angles"].append(row)
-        del emb
+        del emb, basis
 
         graphs = []
         for p in by["neighbors_h5"]["path"]:
             d, cells = cc.read_neighbors(p)
             graphs.append(cc.align_graph(d, cells, order))
-        for i, j in itertools.combinations(range(len(graphs)), 2):
-            a, b = by["neighbors_h5"].iloc[i], by["neighbors_h5"].iloc[j]
-            frac = cc.knn_shared_fraction(graphs[i], graphs[j])
+        stored = [cc.neighbours_per_cell(d) for d in graphs]
+        near = {}  # (graph, k) -> its k nearest neighbours, computed once
+
+        def nn(i, k):
+            if (i, k) not in near:
+                near[(i, k)] = cc.nearest(graphs[i], k)
+            return near[(i, k)]
+
+        for i, j, a, b in pairs(by["neighbors_h5"]):
+            ka, kb = stored[i], stored[j]
+            k = min(ka, kb)
+            frac = cc.knn_shared_fraction(graphs[i], graphs[j], k=k, n1=nn(i, k), n2=nn(j, k))
             t["knn"].append({"size": size, "pair": f"{a['label']}  vs  {b['label']}",
                              "category": pair_category(a["nodes"], b["nodes"]),
+                             "neighbours stored": f"{ka} / {kb}", "k compared": min(ka, kb),
                              "mean_shared": float(frac.mean()),
                              "cells_identical": float((frac == 1).mean())})
-        del graphs
+        del graphs, near
 
         labels = [cc.read_clusters(p).reindex(order) for p in by["clusters_tsv"]["path"]]
         _check_complete(labels, by["clusters_tsv"])
-        for i, j in itertools.combinations(range(len(labels)), 2):
-            a, b = by["clusters_tsv"].iloc[i], by["clusters_tsv"].iloc[j]
+        n_clusters = [lab.nunique() for lab in labels]
+        labels = [cc.codes(lab) for lab in labels]  # integer codes: fast ARI
+        for i, j, a, b in pairs(by["clusters_tsv"]):
             t["ari"].append({"size": size, "a": a["label"], "b": b["label"],
                              "category": pair_category(a["nodes"], b["nodes"]),
                              "ari": cc.ari(labels[i], labels[j])})
         if len(by["rawdata_clusters_truth"]):
             truth = cc.read_truth(by["rawdata_clusters_truth"]["path"].iloc[0]).reindex(order)
-            for lab, (_, r) in zip(labels, by["clusters_tsv"].iterrows()):
+            truth_codes = {col: cc.codes(truth[col]) for col in truth.columns}
+            for lab, nclu, (_, r) in zip(labels, n_clusters, by["clusters_tsv"].iterrows()):
                 for col in truth.columns:
-                    t["truth"].append({"size": size, "pipeline": r["label"], "column": col,
-                                       "ari": cc.ari(truth[col], lab), "nmi": cc.nmi(truth[col], lab),
-                                       "clusters": lab.nunique(), "annotated types": truth[col].nunique()})
+                    t["truth"].append({"size": size, "pipeline": _no_seed(r["label"]), "run": r["label"],
+                                       "column": col,
+                                       "ari": cc.ari(truth_codes[col], lab), "nmi": cc.nmi(truth_codes[col], lab),
+                                       "clusters": nclu, "annotated types": truth[col].nunique()})
 
     tables = {k: pd.DataFrame(v) for k, v in t.items()}
     for k in ("knn", "ari", "pca_angles"):
         if len(tables[k]) == 0:
             tables[k] = pd.DataFrame(columns=["size", "category"])
     return tables, n_cells
+
+
+def _no_seed(label):
+    """Pipeline label without its [seed] tags: all seeds of one pipeline together."""
+    return re.sub(r"\[[^\]]*\]", "", label)
+
+
+def summarise(table, value_cols, extra=None):
+    """Per size and category: number of pairs and min / median / max of each value."""
+    if not len(table) or "category" not in table:
+        return table
+    agg = {"pairs": (value_cols[0], "count")}
+    for c in value_cols:
+        agg.update({f"{c} min": (c, "min"), f"{c} median": (c, "median"), f"{c} max": (c, "max")})
+    for name, (col, fn) in (extra or {}).items():
+        agg[name] = (col, fn)
+    return table.groupby(["size", "category"]).agg(**agg).reset_index()
 
 
 def _cell_order(g):
@@ -179,22 +238,48 @@ def table_html(df, floatfmt="{:.4g}", fold_above=20, summary="Table"):
 
 
 def truth_wide(truth, sizes):
-    """One row per pipeline: clusters and ARI per annotation column, per size."""
-    w = truth.pivot_table(index="pipeline", columns=["size", "column"], values="ari")
-    k = truth.pivot_table(index="pipeline", columns="size", values="clusters")
+    """One row per pipeline (all its seeds together): runs, median clusters and median ARI
+    per annotation column, per size."""
+    w = truth.pivot_table(index="pipeline", columns=["size", "column"], values="ari", aggfunc="median")
+    k = truth.pivot_table(index="pipeline", columns="size", values="clusters", aggfunc="median")
+    n = truth.pivot_table(index="pipeline", columns="size", values="run", aggfunc="nunique")
     cols = {}
     for s in sizes:
+        if s in n:
+            cols[f"{s}: runs"] = n[s]
         if s in k:
-            cols[f"{s}: clusters"] = k[s]
+            cols[f"{s}: clusters (median)"] = k[s]
         for c in sorted(truth["column"].unique()):
             if (s, c) in w:
-                cols[f"{s}: ARI {c}"] = w[(s, c)]
+                cols[f"{s}: ARI {c} (median)"] = w[(s, c)]
     return pd.DataFrame(cols).reset_index()
 
 
-def section(title, key, body, note=None):
-    n = f"<p class='note'>{html.escape(note)}</p>" if note else ""
-    return f"<section><h2>{title}</h2><p class='desc'>{DESCRIPTIONS[key]}</p>{n}{body}</section>"
+STAGES = [  # (id, tab label, title)
+    ("overview", "Overview", "Runs found and how pairs are labelled"),
+    ("pca", "PCA", "PCA: component agreement"),
+    ("knn", "kNN", "kNN: neighbour agreement"),
+    ("ari", "Leiden", "Leiden: agreement between runs"),
+    ("truth", "Annotation", "Leiden: agreement with the annotation"),
+    ("scaling", "Scaling", "Scaling with dataset size"),
+]
+
+
+def _block(kind, body, size=None):
+    s = f' data-size="{html.escape(size)}"' if size else ""
+    return f'<div class="blk" data-kind="{kind}"{s}>{body}</div>'
+
+
+def _per_size(sizes, n_cells, make_fig, make_table):
+    """One figure and one table per dataset size, each tagged for the size filter."""
+    out = []
+    for size in sizes:
+        fig, tab = make_fig(size), make_table(size)
+        out.append(f'<div class="size" data-size="{html.escape(size)}">'
+                   f'<h3>{html.escape(size)} <span class="cells">{n_cells[size]:,} cells</span></h3>'
+                   + (_block("figure", fig_html(fig)) if fig is not None else "")
+                   + _block("table", table_html(tab)) + "</div>")
+    return "".join(out)
 
 
 def render(df, tables, n_cells, source):
@@ -204,36 +289,63 @@ def render(df, tables, n_cells, source):
               .reindex(sizes).rename_axis(columns=None).reset_index())
     counts.insert(1, "cells", counts["size"].map(n_cells))
     miss = pd.concat([missing(df, oid) for oid in OUTPUTS], ignore_index=True)
-    has_floor = tables["ari"]["category"].isin(["seed", "replicate"]).any()
+    has_floor = (tables["ari"]["category"].str.startswith("seed")
+                 | (tables["ari"]["category"] == "replicate")).any()
     floor_note = None if has_floor else (
         "No seed or replicate pairs in this run, so there is no noise floor yet: "
-        "differences below cannot be compared with seed noise.")
+        "differences cannot be compared with seed noise.")
 
-    parts = [section("1. Runs found", "runs",
-                     table_html(counts) + "<h3>Missing combinations</h3>" + table_html(miss)),
-             f"<section><h2>2. How pairs are labelled</h2><p class='desc'>{DESCRIPTIONS['labels']}</p></section>"]
+    def at(t, size):
+        return t[t["size"] == size] if len(t) and "size" in t else t
+
+    body = {"overview": _block("desc", f"<p class='desc'>{DESCRIPTIONS['runs']}</p>")
+            + _block("table", table_html(counts) + "<h3>Missing combinations</h3>" + table_html(miss))
+            + _block("desc", f"<h3>How pairs are labelled</h3><p class='desc'>{DESCRIPTIONS['labels']}</p>")}
+    notes = {}
 
     if len(tables["pca_curves"]):
-        parts.append(section("3. PCA: component agreement", "pca",
-                             fig_html(fg.pca_components(tables["pca_curves"], sizes))
-                             + table_html(tables["pca_angles"])))
+        angles = [c for c in tables["pca_angles"] if "angle" in c]
+        body["pca"] = _per_size(
+            sizes, n_cells,
+            lambda s: fg.pca_components(at(tables["pca_curves"], s), [s]) if len(at(tables["pca_curves"], s)) else None,
+            lambda s: summarise(at(tables["pca_angles"], s), angles))
     if len(tables["knn"]) and "pair" in tables["knn"]:
-        parts.append(section("4. kNN: neighbour agreement", "knn",
-                             fig_html(fg.knn_pairs(tables["knn"], sizes))
-                             + table_html(tables["knn"], summary="All pairs"), floor_note))
+        stored = {"neighbours stored": ("neighbours stored", lambda x: ", ".join(sorted(set(x))))}
+        body["knn"] = _per_size(
+            sizes, n_cells,
+            lambda s: fg.by_category(at(tables["knn"], s), [s], "mean_shared",
+                                     "mean shared-neighbour fraction (line = median)") if len(at(tables["knn"], s)) else None,
+            lambda s: summarise(at(tables["knn"], s), ["mean_shared", "cells_identical"], stored))
+        notes["knn"] = floor_note
     if len(tables["ari"]) and "ari" in tables["ari"]:
-        summary = (tables["ari"].groupby(["size", "category"])["ari"]
-                   .agg(pairs="count", min="min", median="median", max="max").reset_index())
-        parts.append(section("5. Leiden: agreement between runs", "ari",
-                             fig_html(fg.ari_by_category(tables["ari"], sizes))
-                             + table_html(summary), floor_note))
+        body["ari"] = _per_size(
+            sizes, n_cells,
+            lambda s: fg.by_category(at(tables["ari"], s), [s], "ari",
+                                     "ARI between runs (1 = identical; line = median)") if len(at(tables["ari"], s)) else None,
+            lambda s: summarise(at(tables["ari"], s), ["ari"]))
+        notes["ari"] = floor_note
     if len(tables["truth"]):
-        parts.append(section("6. Leiden: agreement with the annotation", "truth",
-                             fig_html(fg.truth_ari(tables["truth"], sizes))
-                             + table_html(truth_wide(tables["truth"], sizes), summary="Per pipeline")))
+        body["truth"] = _per_size(
+            sizes, n_cells,
+            lambda s: fg.truth_ari(at(tables["truth"], s), [s]) if len(at(tables["truth"], s)) else None,
+            lambda s: truth_wide(at(tables["truth"], s), [s]))
     if len(sizes) > 1 and (len(tables["ari"]) or len(tables["knn"])):
-        parts.append(section("7. Scaling with dataset size", "scaling",
-                             fig_html(fg.scaling(tables["ari"], tables["knn"], n_cells))))
+        body["scaling"] = (_block("figure", fig_html(fg.scaling(tables["ari"], tables["knn"], n_cells)))
+                           + "<p class='note'>This figure always shows every dataset size.</p>")
+
+    stages = [s for s in STAGES if s[0] in body]
+    tabs = "".join(f'<button type="button" class="tab" data-stage="{sid}" aria-pressed="false">{lab}</button>'
+                   for sid, lab, _ in stages)
+    size_boxes = "".join(f'<label class="pill"><input type="checkbox" name="size" value="{html.escape(s)}" checked> '
+                         f'{html.escape(s)}</label>' for s in sizes)
+    kind_boxes = "".join(f'<label class="pill"><input type="checkbox" name="kind" value="{k}" checked> {lab}</label>'
+                         for k, lab in (("figure", "Figures"), ("table", "Tables"), ("desc", "Descriptions")))
+    sections = []
+    for sid, _, title in stages:
+        desc = "" if sid == "overview" else _block("desc", f"<p class='desc'>{DESCRIPTIONS[sid]}</p>")
+        note = f"<p class='note'>{html.escape(notes[sid])}</p>" if notes.get(sid) else ""
+        sections.append(f'<section class="stage" data-stage="{sid}"><h2>{title}</h2>{desc}{note}{body[sid]}'
+                        f'<p class="empty note" hidden>No dataset selected.</p></section>')
 
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     return f"""<!doctype html>
@@ -241,24 +353,70 @@ def render(df, tables, n_cells, source):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Concordance report</title>
 <style>
-  :root {{ --ink:#0b0b0b; --ink2:#52514e; --line:#e4e3df; --bg:#fcfcfb; --note:#fff4e5; }}
+  :root {{ --ink:#0b0b0b; --ink2:#52514e; --line:#e4e3df; --bg:#fcfcfb; --note:#fff4e5; --acc:#2a78d6; }}
   body {{ background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,sans-serif;
          max-width:1100px; margin:0 auto; padding:24px 16px 64px; }}
-  h1 {{ font-size:1.6rem; margin:0 0 4px; }} h2 {{ font-size:1.2rem; margin:40px 0 6px; }}
-  h3 {{ font-size:1rem; margin:20px 0 6px; }}
-  .meta {{ color:var(--ink2); font-size:.9rem; }} .desc {{ max-width:75ch; }}
+  h1 {{ font-size:1.6rem; margin:0 0 4px; }} h2 {{ font-size:1.2rem; margin:24px 0 6px; }}
+  h3 {{ font-size:1rem; margin:24px 0 4px; }} .cells {{ color:var(--ink2); font-weight:400; font-size:.85rem; }}
+  .meta {{ color:var(--ink2); font-size:.9rem; margin:0 0 12px; }} .desc {{ max-width:75ch; }}
   .note {{ background:var(--note); padding:6px 10px; border-radius:4px; max-width:75ch; font-size:.9rem; }}
-  img {{ max-width:100%; height:auto; display:block; margin:12px 0; }}
+  .bar {{ position:sticky; top:0; z-index:2; background:var(--bg); border-bottom:1px solid var(--line);
+         padding:10px 0; display:flex; flex-direction:column; gap:8px; }}
+  .row {{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; }}
+  .row > span {{ color:var(--ink2); font-size:.8rem; width:5.5em; }}
+  .tab {{ font:inherit; font-size:.9rem; padding:4px 12px; border:1px solid var(--line); border-radius:6px;
+         background:#fff; color:var(--ink); cursor:pointer; }}
+  .tab[aria-pressed="true"] {{ background:var(--acc); border-color:var(--acc); color:#fff; }}
+  .pill {{ font-size:.85rem; padding:2px 10px; border:1px solid var(--line); border-radius:999px;
+          background:#fff; cursor:pointer; user-select:none; }}
+  .pill input {{ margin:0 4px 0 0; vertical-align:-1px; }}
+  img {{ max-width:100%; height:auto; display:block; margin:8px 0; }}
   table.t {{ border-collapse:collapse; font-size:.8rem; margin:8px 0; display:block; overflow-x:auto; }}
   table.t th, table.t td {{ padding:3px 8px; border-bottom:1px solid var(--line); text-align:left; }}
   table.t td:first-child, table.t td:nth-child(2) {{ white-space:nowrap; }}
-  code {{ font-size:.85em; }}
-  summary {{ cursor:pointer; color:var(--ink2); font-size:.9rem; margin:8px 0; }}
+  code {{ font-size:.85em; }} summary {{ cursor:pointer; color:var(--ink2); font-size:.9rem; margin:8px 0; }}
+  [hidden] {{ display:none !important; }}
 </style></head><body>
 <h1>Concordance report</h1>
-<p class="meta">Generated {stamp} from {html.escape(source)}: {len(df)} output files,
-{len(sizes)} dataset size(s).</p>
-{''.join(parts)}
+<p class="meta">Generated {stamp} from {html.escape(source)}: {len(df)} output files, {len(sizes)} dataset size(s).</p>
+<div class="bar">
+  <div class="row"><span>Stage</span>{tabs}</div>
+  <div class="row"><span>Datasets</span>{size_boxes}</div>
+  <div class="row"><span>Show</span>{kind_boxes}</div>
+</div>
+{''.join(sections)}
+<script>
+(function () {{
+  const KEY = "concordance-report-view";
+  const tabs = [...document.querySelectorAll(".tab")];
+  const boxes = name => [...document.querySelectorAll(`input[name="${{name}}"]`)];
+  let state = {{ stage: tabs.length ? tabs[0].dataset.stage : null }};
+  try {{
+    const saved = JSON.parse(localStorage.getItem(KEY) || "null");
+    if (saved) {{
+      if (tabs.some(t => t.dataset.stage === saved.stage)) state.stage = saved.stage;
+      for (const name of ["size", "kind"])
+        if (Array.isArray(saved[name])) boxes(name).forEach(b => b.checked = saved[name].includes(b.value));
+    }}
+  }} catch (e) {{}}
+  function apply() {{
+    const sizes = boxes("size").filter(b => b.checked).map(b => b.value);
+    const kinds = boxes("kind").filter(b => b.checked).map(b => b.value);
+    tabs.forEach(t => t.setAttribute("aria-pressed", String(t.dataset.stage === state.stage)));
+    document.querySelectorAll("section.stage").forEach(sec => {{
+      sec.hidden = sec.dataset.stage !== state.stage;
+      const perSize = sec.querySelectorAll(".size");
+      perSize.forEach(d => d.hidden = !sizes.includes(d.dataset.size));
+      sec.querySelector(".empty").hidden = !(perSize.length && sizes.length === 0);
+    }});
+    document.querySelectorAll(".blk").forEach(b => b.hidden = !kinds.includes(b.dataset.kind));
+    try {{ localStorage.setItem(KEY, JSON.stringify({{ stage: state.stage, size: sizes, kind: kinds }})); }} catch (e) {{}}
+  }}
+  tabs.forEach(t => t.addEventListener("click", () => {{ state.stage = t.dataset.stage; apply(); }}));
+  document.querySelectorAll(".bar input").forEach(b => b.addEventListener("change", apply));
+  apply();
+}})();
+</script>
 </body></html>"""
 
 

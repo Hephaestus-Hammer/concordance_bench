@@ -10,8 +10,7 @@ import h5py
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
-from scipy.linalg import subspace_angles
-from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+from sklearn.metrics import normalized_mutual_info_score
 
 
 # ---- readers (the omni-scrna stage formats) ------------------------------------
@@ -61,42 +60,102 @@ def pca_one_minus_abs_cos(a, b):
     return 1 - np.clip(cos, 0, 1)
 
 
-def pca_max_angle(a, b, k):
-    """Largest principal angle (degrees) between the spans of the first k components."""
-    a = np.asarray(a, dtype=np.float64)[:, :k]
-    b = np.asarray(b, dtype=np.float64)[:, :k]
-    return float(np.degrees(subspace_angles(a, b).max()))
+def pca_basis(a, k):
+    """Orthonormal basis of the span of the first k components (cells x k)."""
+    q, _ = np.linalg.qr(np.asarray(a, dtype=np.float64)[:, :k])
+    return q
+
+
+def pca_max_angle(a, b, k=None, qa=None, qb=None):
+    """Largest principal angle (degrees) between the spans of the first k components.
+
+    Pass precomputed bases (pca_basis) as qa, qb to reuse them across pairs. Uses the
+    sine form, which stays accurate for the tiny angles between near-identical runs
+    (the cosine form, arccos of ~1, does not).
+    """
+    qa = pca_basis(a, k) if qa is None else qa
+    qb = pca_basis(b, k) if qb is None else qb
+    resid = qb - qa @ (qa.T @ qb)  # part of b's span outside a's span
+    s = np.sqrt(max(np.linalg.eigvalsh(resid.T @ resid)[-1], 0.0))  # its largest singular value
+    return float(np.degrees(np.arcsin(min(s, 1.0))))
 
 
 # ---- kNN -----------------------------------------------------------------------
 
-def _neighbour_keys(d):
-    """Stored edges without the diagonal, as row * n + col.
+def neighbours_per_cell(d):
+    """Stored neighbours per cell, not counting the cell itself (median over cells)."""
+    c = d.tocoo()
+    return int(np.median(np.bincount(c.row[c.row != c.col], minlength=d.shape[0])))
 
-    The cell itself is not counted as a neighbour, whether or not a module stores
-    it. Stored zero distances to other cells (duplicates) are kept: they are real
-    neighbours.
+
+def _nearest_keys(d, k):
+    """Each cell's k nearest stored neighbours (by distance, self excluded), as row * n + col.
+
+    Modules do not store the same number of neighbours: scanpy keeps n_neighbors - 1
+    on its exact path but pynndescent's raw n_neighbors (+ self) on its approximate
+    path. Comparing the k nearest on both sides compares like with like. Stored zero
+    distances to other cells (duplicates) are kept: they are real neighbours.
     """
     c = d.tocoo()
     keep = c.row != c.col
-    rows = c.row[keep].astype(np.int64)
-    return rows * d.shape[0] + c.col[keep], rows
+    rows, cols, dist = c.row[keep].astype(np.int64), c.col[keep], c.data[keep]
+    order = np.lexsort((cols, dist, rows))  # by row, then distance, then index for ties
+    rows, cols = rows[order], cols[order]
+    start = np.searchsorted(rows, rows)  # first position of each row
+    take = (np.arange(len(rows)) - start) < k
+    return rows[take] * d.shape[0] + cols[take], rows[take]
 
 
-def knn_shared_fraction(d1, d2):
-    """Per cell: neighbours in both graphs / size of the larger neighbour set."""
-    n = d1.shape[0]
-    k1, r1 = _neighbour_keys(d1)
-    k2, r2 = _neighbour_keys(d2)
-    shared = np.bincount(r1[np.isin(k1, k2)], minlength=n)
+def nearest(d, k):
+    """Each cell's k nearest neighbours as sorted keys plus their rows, for reuse across pairs."""
+    keys, rows = _nearest_keys(d, k)
+    order = np.argsort(keys)
+    return keys[order], rows[order], d.shape[0]
+
+
+def knn_shared_fraction(d1, d2, k=None, n1=None, n2=None):
+    """Per cell: share of its k nearest neighbours that the two graphs have in common.
+
+    k defaults to the smaller of the two graphs' neighbours per cell. Pass
+    precomputed nearest(d, k) as n1, n2 to reuse them across pairs.
+    """
+    if k is None:
+        k = min(neighbours_per_cell(d1), neighbours_per_cell(d2))
+    k1, r1, n = nearest(d1, k) if n1 is None else n1
+    k2, r2, _ = nearest(d2, k) if n2 is None else n2
+    pos = np.searchsorted(k2, k1).clip(max=len(k2) - 1)
+    shared = np.bincount(r1[k2[pos] == k1], minlength=n)
     size = np.maximum(np.bincount(r1, minlength=n), np.bincount(r2, minlength=n))
     return np.divide(shared, size, out=np.ones(n), where=size > 0)
 
 
 # ---- clustering ----------------------------------------------------------------
 
+def codes(labels):
+    """Labels as integer codes 0..m-1: compute once per clustering, reuse for every pair."""
+    return pd.factorize(np.asarray(labels))[0]
+
+
+def _comb2(x):
+    x = x.astype(np.float64)
+    return (x * (x - 1) / 2).sum()
+
+
 def ari(a, b):
-    return float(adjusted_rand_score(a, b))
+    """Adjusted Rand index (same value as sklearn's), fast on integer codes from codes()."""
+    a = a if np.issubdtype(np.asarray(a).dtype, np.integer) else codes(a)
+    b = b if np.issubdtype(np.asarray(b).dtype, np.integer) else codes(b)
+    a, b = np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)
+    nb = int(b.max()) + 1
+    table = np.bincount(a * nb + b, minlength=(int(a.max()) + 1) * nb)
+    sum_ij = _comb2(table)
+    sum_a, sum_b = _comb2(np.bincount(a)), _comb2(np.bincount(b))
+    total = len(a) * (len(a) - 1) / 2
+    expected = sum_a * sum_b / total
+    top = (sum_a + sum_b) / 2
+    if top == expected:  # both partitions trivial (one cluster each, or all singletons)
+        return 1.0
+    return float((sum_ij - expected) / (top - expected))
 
 
 def nmi(a, b):

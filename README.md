@@ -40,7 +40,7 @@ or `n_iterations`. The baseline modules (`pc-baseline`, `nn-baseline`,
 `cl-baseline`) therefore run the
 [`Hephaestus-Hammer/scanpy`](https://github.com/Hephaestus-Hammer/scanpy/tree/baseline-options)
 fork, which adds them; the plan moves back to `omni-scrna/scanpy` once they are
-merged upstream. The baseline runs seed 0 only until the seed design is settled.
+merged upstream.
 
 ## Setup
 
@@ -76,7 +76,12 @@ size on a CPU host). That is what attributes disagreement to a stage. The
 scanpy-defaults and rapids modules are
 [omni-scrna/scanpy](https://github.com/omni-scrna/scanpy) and
 [omni-scrna/rapids-singlecell](https://github.com/omni-scrna/rapids-singlecell),
-run unchanged. Every seed is fixed at 0 for now.
+run unchanged.
+
+Seeded modules (arpack PCA, pynndescent kNN, every Leiden) list seeds 0-19. The
+noise floor is measured one stage at a time: `filters/noise-*.yaml` vary one
+stage's seed while every other stage stays at seed 0. Always run through a
+filter: without one, the seed lists expand against each other.
 
 ## Running
 
@@ -108,9 +113,12 @@ combinations picked in an obfilter file. The files in `filters/` are those picks
 
 | Filter | Runs | Host |
 |---|---|---|
-| `smoke.yaml` | 10k, CPU modules (scanpy defaults + baseline): a quick end-to-end check | any |
-| `smoke-gpu.yaml` | 10k, every module: 27 combinations | GPU |
-| `cpu-only.yaml` | all sizes, CPU modules (scanpy defaults + baseline) | any |
+| `smoke.yaml` | 10k, CPU modules (scanpy defaults + baseline), seed 0: 8 combinations | any |
+| `smoke-gpu.yaml` | 10k, every module, seed 0: 27 combinations | GPU |
+| `cpu-only.yaml` | all sizes, CPU modules, seed 0 | any |
+| `noise-pca.yaml` | all sizes, CPU modules: 20 arpack PCA seeds, seed 0 downstream | any |
+| `noise-knn.yaml` | all sizes, CPU modules: 20 pynndescent kNN seeds, seed 0 elsewhere | any |
+| `noise-cluster.yaml` | all sizes, CPU modules: 20 Leiden seeds, seed 0 upstream | any |
 
 **A filter bypasses the capability gate:** every module it picks runs, even
 rapids on a CPU host. That is why the CPU filters leave the rapids modules out.

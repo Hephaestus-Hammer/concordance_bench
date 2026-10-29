@@ -1,4 +1,4 @@
-# obfilter: every size, CPU modules only (scanpy defaults + baseline). Needed because a filter
+# obfilter (seed 0 only): every size, CPU modules only (scanpy defaults + baseline). Needed because a filter
 # bypasses the capability gate; without a filter, `ob run` on a CPU host prunes the rapids modules by itself.
 picks:
   data:
@@ -8,11 +8,11 @@ picks:
   input:
     hao_input: all
   pca:
-    pc-scanpy: all
+    pc-scanpy: first
     pc-baseline: all
   knn:
-    nn-scanpy: all
+    nn-scanpy: first
     nn-baseline: all
   cluster:
-    cl-scanpy: all
-    cl-baseline: all
+    cl-scanpy: first
+    cl-baseline: first
