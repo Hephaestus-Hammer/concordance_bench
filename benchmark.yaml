@@ -4,6 +4,12 @@
 # output, so implementations mix (e.g. rapids PCA -> baseline kNN -> scanpy Leiden): that is
 # what attributes disagreement to a stage. Concordance itself is computed offline in analysis/.
 #
+# Modules: every PCA, kNN and Leiden module runs through this repo's `stage` entrypoint
+# (modules/stage.sh), which runs one script of a module, unchanged, under denet and writes
+# <output_dir>/denet.jsonl next to its outputs (CPU, memory, threads, GPU). The module is the
+# `module` parameter (<git url>@<commit>), its script the `script` parameter; the other
+# parameters reach the script as before. denet is in envs/scanpy.yml and envs/rapids.yml.
+#
 # Seeds: modules that use their seed (arpack PCA, pynndescent kNN, every Leiden) list seeds
 # 0-19; seed 0 comes first. Lists expand as a grid across stages, so run through a filter:
 # `first` keeps seed 0 for a module, `all` keeps every seed. filters/noise-*.yaml vary one
@@ -77,25 +83,25 @@ stages:
       - id: pc-scanpy
         name: "scanpy defaults: PCA (arpack)"
         software_environment: scanpy
-        repository: &scanpy {url: https://github.com/omni-scrna/scanpy, commit: b98b70b7cd72be784356045f825d48a1a7dc9365, entrypoint: pca}
+        repository: &stage {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: 52c8c6466e394179cb12fd63972dce27731b7ada, entrypoint: stage}
         parameters:
-          - {solver: arpack, n_components: 50, dtype: float64, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
-      # The blessed baseline (README): deterministic, single-threaded BLAS. Pinned to the
+          - {module: &m_scanpy "https://github.com/omni-scrna/scanpy@b98b70b7cd72be784356045f825d48a1a7dc9365", script: pca.py, solver: arpack, n_components: 50, dtype: float64, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
+      # The blessed baseline (README): deterministic, single-threaded BLAS. Its module is the
       # Hephaestus-Hammer/scanpy fork (branch baseline-options), which exposes covariance_eigh,
       # exact kNN and n_iterations; back to omni-scrna/scanpy once merged upstream.
       - id: pc-baseline
         name: "Baseline: PCA (covariance_eigh, float64, 1 BLAS thread)"
         software_environment: scanpy
-        repository: &baseline {url: https://github.com/Hephaestus-Hammer/scanpy, commit: d9535dc8c8ab5c84d925be230d858b23c2b15b89, entrypoint: pca}
+        repository: *stage
         parameters:
-          - {solver: covariance_eigh, n_components: 50, dtype: float64, blas_threads: 1, random_seed: 0}
+          - {module: &m_baseline "https://github.com/Hephaestus-Hammer/scanpy@d9535dc8c8ab5c84d925be230d858b23c2b15b89", script: pca.py, solver: covariance_eigh, n_components: 50, dtype: float64, blas_threads: 1, random_seed: 0}
       - id: pc-rapids
         name: "rapids-singlecell PCA (covariance eigh, GPU)"
         software_environment: rapids
         requires_capabilities: [gpu]
-        repository: &rapids {url: https://github.com/omni-scrna/rapids-singlecell, commit: 29b6614ca06b7aefb2d475377b5600f9dcd6fd64, entrypoint: pca}
+        repository: *stage
         parameters:
-          - {solver: covariance-eigh, n_components: 50, dtype: float64, random_seed: 0}
+          - {module: &m_rapids "https://github.com/omni-scrna/rapids-singlecell@29b6614ca06b7aefb2d475377b5600f9dcd6fd64", script: pca.py, solver: covariance-eigh, n_components: 50, dtype: float64, random_seed: 0}
 
   # scanpy's kNN is exact below 8,192 cells (euclidean) and pynndescent, approximate, above: so
   # approximate at every size here. rapids' is exact (cuVS brute force).
@@ -108,22 +114,22 @@ stages:
       - id: nn-scanpy
         name: "scanpy defaults: kNN (pynndescent above 8,192 cells, umap connectivities)"
         software_environment: scanpy
-        repository: {<<: *scanpy, entrypoint: knn}
+        repository: *stage
         parameters:
-          - {n_neighbors: 15, flavor: umap, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
+          - {module: *m_scanpy, script: knn.py, n_neighbors: 15, flavor: umap, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
       - id: nn-baseline
         name: "Baseline: kNN (exact, sklearn brute force, umap connectivities)"
         software_environment: scanpy
-        repository: {<<: *baseline, entrypoint: knn}
+        repository: *stage
         parameters:
-          - {n_neighbors: 15, flavor: umap, transformer: sklearn, random_seed: 0}
+          - {module: *m_baseline, script: knn.py, n_neighbors: 15, flavor: umap, transformer: sklearn, random_seed: 0}
       - id: nn-rapids
         name: "rapids-singlecell kNN (cuVS brute force, GPU)"
         software_environment: rapids
         requires_capabilities: [gpu]
-        repository: {<<: *rapids, entrypoint: knn}
+        repository: *stage
         parameters:
-          - {n_neighbors: 15, flavor: rapids, random_seed: 0}
+          - {module: *m_rapids, script: knn.py, n_neighbors: 15, flavor: rapids, random_seed: 0}
 
   - id: cluster
     inputs: [neighbors_h5]
@@ -134,19 +140,19 @@ stages:
       - id: cl-scanpy
         name: "scanpy defaults: Leiden (igraph, 2 iterations)"
         software_environment: scanpy
-        repository: {<<: *scanpy, entrypoint: cluster}
+        repository: *stage
         parameters:
-          - {flavor: igraph, resolution: 1.0, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
+          - {module: *m_scanpy, script: cluster.py, flavor: igraph, resolution: 1.0, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
       - id: cl-baseline
         name: "Baseline: Leiden (leidenalg, until converged, undirected)"
         software_environment: scanpy
-        repository: {<<: *baseline, entrypoint: cluster}
+        repository: *stage
         parameters:
-          - {flavor: leidenalg, n_iterations: -1, resolution: 1.0, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
+          - {module: *m_baseline, script: cluster.py, flavor: leidenalg, n_iterations: -1, resolution: 1.0, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
       - id: cl-rapids
         name: "rapids-singlecell Leiden (GPU)"
         software_environment: rapids
         requires_capabilities: [gpu]
-        repository: {<<: *rapids, entrypoint: cluster}
+        repository: *stage
         parameters:
-          - {method: rapids-leiden, resolution: 1.0, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
+          - {module: *m_rapids, script: cluster_graph.py, method: rapids-leiden, resolution: 1.0, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}

@@ -78,6 +78,16 @@ scanpy-defaults and rapids modules are
 [omni-scrna/rapids-singlecell](https://github.com/omni-scrna/rapids-singlecell),
 run unchanged.
 
+Every PCA, kNN and Leiden module runs through this repo's `stage` entrypoint
+(`modules/stage.sh`), the approach of sc-brrr's `prof.sh`: the module is a
+parameter (`module: <git url>@<commit>`, `script: pca.py`), checked out once per
+commit into `~/.cache/concordance_bench/modules`, and its script runs unchanged
+under [denet](https://github.com/btraven00/denet), which writes `denet.jsonl`
+(CPU, memory, threads, GPU) and `module.log` next to the job's outputs. denet is
+added to `envs/scanpy.yml` and `envs/rapids.yml`. A wrapper is needed because
+ob 0.7.0 runs the modules' own `-prof` entrypoints (`denet pca.py`) as
+`python3 denet pca.py`.
+
 Seeded modules (arpack PCA, pynndescent kNN, every Leiden) list seeds 0-19. The
 noise floor is measured one stage at a time: `filters/noise-*.yaml` vary one
 stage's seed while every other stage stays at seed 0. Always run through a
@@ -148,12 +158,13 @@ concordance-bench/
 │   └── cpu-only.yaml
 ├── envs/                      # one conda env per software_environment in the plan
 │   ├── data.yml               #   omni-huggingface (data download)
-│   ├── scanpy.yml             #   omni-scrna/scanpy; also runs hao_input
-│   └── rapids.yml             #   omni-scrna/rapids-singlecell (CUDA 13)
+│   ├── scanpy.yml             #   omni-scrna/scanpy + denet; also runs hao_input
+│   └── rapids.yml             #   omni-scrna/rapids-singlecell (CUDA 13) + denet
 │
 ├── omnibenchmark.yaml         # entrypoints for this repo's own modules (below)
 ├── modules/
 │   ├── hao_input.py           # Hao .h5ad -> feature-selection output format + truth labels
+│   ├── stage.sh               # entrypoint `stage`: a module's script, unchanged, under denet
 │   └── concordance.py         # later: pairwise metric stage (once proven in analysis/)
 │
 ├── profiles/
@@ -162,7 +173,7 @@ concordance-bench/
 ├── analysis/                  # offline: reads the ob output tree, never writes into it
 │   ├── load.py                #   finds runs in out/: stage, module, parameters, seed
 │   ├── concordance.py         #   PCA |cos| and subspace, kNN overlap, ARI between runs and seeds
-│   ├── resources.py           #   parses denet traces: CPU, memory, GPU over time per job
+│   ├── resources.py           #   runtime, cores, memory, GPU per job (denet, else Snakemake)
 │   ├── figures.py             #   one function per report figure
 │   └── report.py              #   all of the above in one self-contained HTML file
 │

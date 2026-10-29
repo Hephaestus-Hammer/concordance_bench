@@ -49,5 +49,9 @@ pipelines (scanpy, rapids) across runs and seeds, plus resource use per job.
   setting yet, so only the baseline PCA is single-threaded.
 - **Environment pinning.** `envs/` are the modules' own exports with loose version
   ranges. Lock them to exact builds (as sc-brrr does) before comparing results.
-- **Resource traces.** No denet traces yet: the modules' `*-prof` entrypoints and
-  denet in each environment are needed for `analysis/resources.py`.
+- **Resource traces.** Every PCA, kNN and Leiden module runs through the `stage`
+  entrypoint (`modules/stage.sh`, like sc-brrr's `prof.sh`): the module is the
+  `module` parameter (`<url>@<commit>`), its script `script`; the script runs
+  unchanged under denet (`<output_dir>/denet.jsonl`, `module.log`). Changing a
+  module means changing its `module` parameter. Jobs without a trace fall back to
+  Snakemake's `performance.txt` (sparse sampling: lower bounds).
