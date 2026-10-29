@@ -45,7 +45,9 @@ merged upstream.
 ## Setup
 
 The environment is managed with [pixi](https://pixi.sh) and pins `ob`, denet and
-the analysis stack in `pixi.lock`.
+the analysis stack in `pixi.lock`. obkit, which parses the denet traces, comes from
+the [Hephaestus-Hammer/obkit](https://github.com/Hephaestus-Hammer/obkit) fork at a
+fixed commit until `obkit.prof` is upstream.
 
 ```sh
 pixi install
@@ -114,9 +116,13 @@ pixi run report        # every metric and figure in one file: results/report/con
 The report also writes one TSV per table next to the HTML. It reads `out/` and
 never writes into it. Its Runtime tab shows per job: wall time, mean and peak
 cores used against the cores the stage is given, peak memory, GPU use, and cores
-over time. It reads each job's denet trace (`denet.jsonl`, see below) and falls
-back to the `performance.txt` ob writes next to every job; Snakemake samples that
-sparsely after a job's first 15 s, so its CPU time and memory are lower bounds.
+over time. Where a module logs phases with obkit's logger (`obkit-events.jsonl`),
+it also splits each job into those phases (load, compute, write, ...) plus the
+unphased start-up and imports, with wall time and cores used per phase
+(`concordance_runtime_phases.tsv`). It reads each job's denet trace
+(`denet.jsonl`, see below) with `obkit.prof` and falls back to the
+`performance.txt` ob writes next to every job; Snakemake samples that sparsely
+after a job's first 15 s, so its CPU time and memory are lower bounds.
 The data stage downloads from Hugging Face, so the host running it needs network
 access.
 
@@ -173,7 +179,7 @@ concordance-bench/
 ├── analysis/                  # offline: reads the ob output tree, never writes into it
 │   ├── load.py                #   finds runs in out/: stage, module, parameters, seed
 │   ├── concordance.py         #   PCA |cos| and subspace, kNN overlap, ARI between runs and seeds
-│   ├── resources.py           #   runtime, cores, memory, GPU per job (denet, else Snakemake)
+│   ├── resources.py           #   runtime, cores, memory, GPU per job and phase (obkit.prof)
 │   ├── figures.py             #   one function per report figure
 │   └── report.py              #   all of the above in one self-contained HTML file
 │
@@ -188,7 +194,7 @@ concordance-bench/
 └── out/                       # gitignored: ob writes here
 ```
 
-Not written yet: `modules/concordance.py`, `analysis/resources.py` and `LICENSE`.
+Not written yet: `modules/concordance.py` and `LICENSE`.
 
 ## Citation
 

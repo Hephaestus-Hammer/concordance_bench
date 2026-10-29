@@ -1,37 +1,48 @@
-"""Runtime, cores and memory per job: from denet traces where they exist, else from ob's benchmark file.
+"""Runtime, cores and memory per job, and per phase where the module logs phases.
 
 denet: the `stage` entrypoint (modules/stage.sh) runs each module script under
-`denet --json run` and writes <output_dir>/denet.jsonl next to the outputs: a `metadata` line (t0_ms), one
-`tree` line per sample (every ~0.1-1 s; `aggregated` = the module and its child
-processes: cpu_usage in % with 100 = one busy core, mem_rss_kb, thread_count, and a
-`gpu` block when run with --gpu), and an `exit` line. From it: wall time, CPU time
-(integral of cpu_usage), mean and peak cores used, peak memory, peak threads, GPU
-utilisation and GPU memory of the process, and the CPU series over time.
+`denet --json run` and writes <output_dir>/denet.jsonl next to the outputs. Modules
+that use obkit's logger also write <output_dir>/obkit-events.jsonl: start and end
+records for named phases (load, compute, write, ...). Parsing and the join of the two
+are obkit.prof's (installed from the Hephaestus-Hammer/obkit fork, see pixi.toml):
+`load_denet` reads the trace, `summarise` gives the whole job, `attribute` splits it
+into phases plus "(unphased)", the time no phase covers (Python start-up, imports).
+
+From a trace: wall time, CPU time (cpu_usage integrated over time; 100 % = one busy
+core, the module and its child processes), mean and peak cores used, peak memory,
+peak threads, GPU utilisation and GPU memory (the process's own where NVML reports
+it, else the device's), and the CPU series over time.
 
 Fallback, for jobs without a trace: the `performance.txt` (Snakemake benchmark) ob
 writes next to every job: s = wall time, max_rss = peak memory (MB), cpu_time.
 Snakemake samples every 0.5 s for 15 s and then every 30 s and loses what happens
 after the last sample, so for longer jobs cpu_time and max_rss are lower bounds.
-No GPU there.
+No GPU and no phases there.
 
-Both measure the whole module call: Python start-up, imports, reading inputs, the
-computation and writing outputs. Every job is a fresh process, so one-off costs such
-as numba compiling pynndescent (~13 s at 10k cells in sc-brrr) are in every kNN job.
+Every job is a fresh process, so one-off costs such as numba compiling pynndescent
+(~13 s at 10k cells in sc-brrr) are in every kNN job; with phases they land in the
+phase that triggers them.
 """
 
-import json
-import math
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import yaml
+from obkit import prof
 
 # output id -> the stage whose node writes it
 STAGE_OF_OUTPUT = {"embedding_tsv": "pca", "neighbors_h5": "knn", "clusters_tsv": "cluster",
                    "rawdata_clusters_truth": "input"}
 FIELDS = ["s", "max_rss", "cpu_time", "peak_cores", "max_threads", "gpu_util_mean", "gpu_util_max",
           "gpu_mem_peak_mb", "source"]
+PHASE_FIELDS = ["duration_s", "cpu_s", "mean_cores", "peak_cores", "peak_rss_mb", "gpu_util_mean",
+                "gpu_mem_peak_mb", "samples"]
+
+
+def _nan(v):
+    return np.nan if v is None else v
 
 
 def read_performance(path):
@@ -39,112 +50,78 @@ def read_performance(path):
     path = Path(path)
     if not path.exists():
         return None
-    t = pd.read_csv(path, sep="\t")
-    if not len(t):
+    rec = prof.load_snakemake_benchmark(path)
+    if rec is None:
         return None
-    row = t.iloc[0]
-    rec = {k: pd.to_numeric(row.get(k), errors="coerce") for k in ("s", "max_rss", "cpu_time")}
-    return {**rec, "source": "snakemake"}
-
-
-def _gpu(record, aggregated):
-    """(utilisation %, memory in bytes) from one sample's GPU block, or (nan, nan).
-
-    denet 0.10.3's traces carry it under parent.gpu.system_metrics (device-wide memory,
-    as sc-brrr's runner reads it); its docs show aggregated.gpu.devices, with the
-    process's own memory where NVML reports it. Both are read; the process's own memory
-    is preferred, else the device's (which counts anything else on the GPU too).
-    """
-    for g in ((record.get("parent") or {}).get("gpu"), (aggregated or {}).get("gpu")):
-        if not g:
-            continue
-        devs = g.get("system_metrics") or g.get("devices") or []
-        util = g.get("max_gpu_utilization")
-        if util is None:
-            us = [d.get("utilization_gpu", d.get("gpu_utilization")) for d in devs]
-            us = [u for u in us if u is not None]
-            util = max(us) if us else None
-        own = [d["process_memory_usage"] for d in devs if d.get("process_memory_usage") is not None]
-        mem = sum(own) if own else g.get("total_memory_used")
-        if mem is None and devs:
-            mem = sum(d.get("memory_used") or 0 for d in devs)
-        return (math.nan if util is None else util), (math.nan if mem is None else mem)
-    return math.nan, math.nan
+    return {**{k: _nan(rec.get(k)) for k in ("s", "max_rss", "cpu_time")}, "source": "snakemake"}
 
 
 def read_denet(path):
-    """(summary dict, series DataFrame) for one denet trace, or (None, None) if unusable."""
+    """(trace, summary dict, series DataFrame) for one denet trace, or (None, None, None)."""
     path = Path(path)
     if not path.exists():
-        return None, None
-    t0 = end = None
-    rows = []
-    with open(path) as f:
-        for line in f:
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError:  # last line of a job killed mid-write
-                continue
-            kind = r.get("kind")
-            if kind == "metadata":
-                t0 = r.get("t0_ms")
-            elif kind in ("tree", "sample"):
-                a = r.get("aggregated") if kind == "tree" else r
-                if not a:
-                    continue
-                gpu_util, gpu_mem = _gpu(r, a)
-                rows.append({"ts": r.get("ts_ms") or a.get("ts_ms"), "cpu": a.get("cpu_usage") or 0.0,
-                             "rss_kb": a.get("mem_rss_kb") or 0, "threads": a.get("thread_count") or 0,
-                             "gpu_util": gpu_util, "gpu_mem": gpu_mem})
-            elif kind == "exit":
-                end = r.get("ts_ms")
-    if not rows:
-        return None, None
-    d = pd.DataFrame(rows)
-    t0 = t0 if t0 is not None else d["ts"].iloc[0]
-    end = end if end is not None else d["ts"].iloc[-1]
-    d["t"] = (d["ts"] - t0) / 1000.0
-    d["cores"] = d["cpu"] / 100.0
-    dt = np.diff(np.concatenate([[0.0], d["t"].to_numpy()]))  # cpu_usage covers the interval before each sample
-    wall = max((end - t0) / 1000.0, float(d["t"].iloc[-1]), 1e-9)
+        return None, None, None
+    trace = prof.load_denet(path)
+    if trace is None:
+        return None, None, None
+    tot = prof.summarise(trace)
+    d = pd.DataFrame(trace["samples"])
+    d["t"] = (d["ts_ms"] - trace["t0_ms"]) / 1000.0
+    d["cores"] = d["cpu_usage"] / 100.0
     gpu_util = pd.to_numeric(d["gpu_util"], errors="coerce")
-    gpu_mem = pd.to_numeric(d["gpu_mem"], errors="coerce")
-    summary = {"s": wall, "max_rss": d["rss_kb"].max() / 1024.0, "cpu_time": float((d["cores"] * dt).sum()),
-               "peak_cores": float(d["cores"].max()), "max_threads": int(d["threads"].max()),
-               "gpu_util_mean": float(gpu_util.mean()) if gpu_util.notna().any() else np.nan,
+    summary = {"s": tot["duration_s"], "max_rss": tot["peak_rss_mb"], "cpu_time": tot["cpu_s"],
+               "peak_cores": tot["peak_cores"], "max_threads": _nan(tot["peak_threads"]),
+               "gpu_util_mean": tot["gpu_util_mean"],
                "gpu_util_max": float(gpu_util.max()) if gpu_util.notna().any() else np.nan,
-               "gpu_mem_peak_mb": float(gpu_mem.max()) / 2**20 if gpu_mem.notna().any() else np.nan,
-               "source": "denet"}
-    return summary, d[["t", "cores", "rss_kb", "threads", "gpu_util"]]
+               "gpu_mem_peak_mb": tot["gpu_mem_peak_mb"], "source": "denet"}
+    return trace, summary, d[["t", "cores", "mem_rss_kb", "thread_count", "gpu_util"]]
+
+
+def read_phases(node_dir, trace):
+    """obkit.prof.attribute rows for one job, or [] if it logged no phases."""
+    path = Path(node_dir) / "obkit-events.jsonl"
+    if trace is None or not path.exists():
+        return []
+    with warnings.catch_warnings():  # a killed job leaves an unmatched start; the rest still counts
+        warnings.simplefilter("ignore")
+        events = prof.load_events(path)
+    if not events:
+        return []
+    return prof.attribute(events, trace)
 
 
 def runtimes(df):
-    """(one row per job, {pipeline label: CPU series}) for every job (node) in df.
+    """(one row per job, {(size, stage, pipeline): CPU series}, one row per job and phase)
+    for every job (node) in df.
 
     df is load.index(...); each output's directory is its node's directory. A job's
-    denet trace is used when present, else its Snakemake benchmark record.
+    denet trace is used when present, else its Snakemake benchmark record. Phases need
+    both a trace and an obkit event log.
     """
-    rows, series, seen = [], {}, set()
+    rows, series, phase_rows, seen = [], {}, [], set()
     for _, r in df.iterrows():
         node_dir = Path(r["path"]).parent
         if node_dir in seen:
             continue
         seen.add(node_dir)
-        rec, ser = read_denet(node_dir / "denet.jsonl")
+        trace, rec, ser = read_denet(node_dir / "denet.jsonl")
         if rec is None:
             rec = read_performance(node_dir / "performance.txt")
         if rec is None:
             continue
         node = r["nodes"][-1]
         stage = STAGE_OF_OUTPUT.get(r["output"], node.stage)
-        rows.append({"size": r["size"], "stage": stage, "module": node.module,
-                     "settings": ", ".join(f"{k}={v}" for k, v in node.settings),
-                     "seed": ", ".join(f"{k}={v}" for k, v in node.seeds),
-                     "pipeline": r["label"], **{k: rec.get(k, np.nan) for k in FIELDS}})
+        job = {"size": r["size"], "stage": stage, "module": node.module,
+               "settings": ", ".join(f"{k}={v}" for k, v in node.settings),
+               "seed": ", ".join(f"{k}={v}" for k, v in node.seeds), "pipeline": r["label"]}
+        rows.append({**job, **{k: rec.get(k, np.nan) for k in FIELDS}})
         if ser is not None:
             series[(r["size"], stage, r["label"])] = ser
-    cols = ["size", "stage", "module", "settings", "seed", "pipeline", *FIELDS]
-    return pd.DataFrame(rows, columns=cols), series
+        for ph in read_phases(node_dir, trace):
+            phase_rows.append({**job, "phase": ph["event"], **{k: _nan(ph.get(k)) for k in PHASE_FIELDS}})
+    cols = ["size", "stage", "module", "settings", "seed", "pipeline"]
+    return (pd.DataFrame(rows, columns=[*cols, *FIELDS]), series,
+            pd.DataFrame(phase_rows, columns=[*cols, "phase", *PHASE_FIELDS]))
 
 
 def allocated_cores(plan):
@@ -178,3 +155,30 @@ def summarise(rt):
                     "GPU memory (MB, peak) median": ("gpu_mem_peak_mb", "median")})
     out = rt.groupby(["size", "stage", "module"]).agg(**agg).reset_index()
     return out.dropna(axis=1, how="all")
+
+
+def summarise_phases(ph, allocated=None):
+    """Per size, stage, module and phase ("(unphased)" first, then the order the module
+    runs them): jobs, median wall time, its share of the job, mean and peak cores, GPU."""
+    if not len(ph):
+        return ph
+    ph = ph.copy()
+    total = ph.groupby(["size", "stage", "pipeline"])["duration_s"].transform("sum")
+    ph["share"] = 100 * ph["duration_s"] / total
+    order = {"(unphased)": 0}  # first, as in the figure: mostly start-up and imports
+    for p in ph["phase"]:
+        order.setdefault(p, len(order))
+    agg = {"jobs": ("duration_s", "count"), "wall time (s) median": ("duration_s", "median"),
+           "share of job (%) median": ("share", "median"), "CPU time (s) median": ("cpu_s", "median"),
+           "mean cores used median": ("mean_cores", "median"), "peak cores used max": ("peak_cores", "max"),
+           "samples (min)": ("samples", "min")}
+    if ph["gpu_util_mean"].notna().any():
+        agg.update({"GPU utilisation % (mean) median": ("gpu_util_mean", "median"),
+                    "GPU memory (MB, peak) max": ("gpu_mem_peak_mb", "max")})
+    out = ph.groupby(["size", "stage", "module", "phase"]).agg(**agg).reset_index()
+    if allocated:
+        out.insert(4, "cores allocated", out["stage"].map(allocated))
+    out["_o"] = out["phase"].map(order)
+    stage_o = {s: i for i, s in enumerate(STAGE_OF_OUTPUT.values())}
+    out = out.sort_values(["size", "stage", "module", "_o"], key=lambda c: c.map(stage_o) if c.name == "stage" else c)
+    return out.drop(columns="_o").dropna(axis=1, how="all")

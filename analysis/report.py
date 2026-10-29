@@ -276,6 +276,17 @@ def truth_wide(truth, sizes):
     return pd.DataFrame(cols).reset_index()
 
 
+PHASES_DESC = """Where a module logs phases with obkit's logger (<code>obkit-events.jsonl</code>: load,
+    compute, write, ...), obkit.prof splits the job's denet trace by phase: wall time, CPU time and
+    mean cores used (CPU time / wall time) per phase, so a phase that should be parallel can be
+    checked against the cores allocated. <em>(unphased)</em> is everything outside a phase: Python
+    start-up, imports, numba compilation triggered at import. GPU phases end when the module
+    logs the end; without a GPU synchronize before it, queued GPU work can spill into the next
+    phase. <em>samples (min)</em> is how many trace samples the shortest such phase overlaps: with
+    fewer than 2, its cores are an estimate from one sample. Modules that log no phases are not
+    shown here (in the pinned versions: omni-scrna scanpy's kNN and Leiden)."""
+
+
 STAGES = [  # (id, tab label, title)
     ("overview", "Overview", "Runs found and how pairs are labelled"),
     ("pca", "PCA", "PCA: component agreement"),
@@ -304,7 +315,7 @@ def _per_size(sizes, n_cells, make_fig, make_table):
     return "".join(out)
 
 
-def render(df, tables, n_cells, source, rt=None, series=None):
+def render(df, tables, n_cells, source, rt=None, series=None, ph=None, allocated=None):
     sizes = sorted(n_cells, key=n_cells.get)
     counts = (df.assign(stage=df["output"]).pivot_table(index="size", columns="stage", values="path",
                                                          aggfunc="count", fill_value=0)
@@ -363,6 +374,11 @@ def render(df, tables, n_cells, source, rt=None, series=None):
                 f'<div class="size" data-size="{html.escape(s)}"><h3>{html.escape(s)}</h3>'
                 + _block("figure", fig_html(f)) + "</div>"
                 for s in sizes if (f := fg.runtime_traces(series, rt, s)) is not None)
+        if ph is not None and len(ph):
+            body["runtime"] += ("<h3>Per phase</h3>" + _block("desc", f"<p class='desc'>{PHASES_DESC}</p>")
+                                + _per_size(sizes, n_cells,
+                                            lambda s: fg.runtime_phases(ph, s, allocated),
+                                            lambda s: rs.summarise_phases(ph[ph["size"] == s], allocated)))
     stages = [s for s in STAGES if s[0] in body]
     tabs = "".join(f'<button type="button" class="tab" data-stage="{sid}" aria-pressed="false">{lab}</button>'
                    for sid, lab, _ in stages)
@@ -457,15 +473,18 @@ def main():
         raise SystemExit("no outputs found: give --from_out or the per-output flags")
     df = index(files)
     tables, n_cells = compute(df)
-    rt, series = rs.runtimes(df)
-    rt = rs.add_cores(rt, rs.allocated_cores(args.plan))
+    rt, series, ph = rs.runtimes(df)
+    allocated = rs.allocated_cores(args.plan)
+    rt = rs.add_cores(rt, allocated)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     source = str(args.from_out) if args.from_out else "gathered files"
     out = args.output_dir / f"{args.name}_report.html"
-    out.write_text(render(df, tables, n_cells, source, rt, series))
+    out.write_text(render(df, tables, n_cells, source, rt, series, ph, allocated))
     if len(rt):
         rt.to_csv(args.output_dir / f"{args.name}_runtime.tsv", sep="\t", index=False)
+    if len(ph):
+        ph.to_csv(args.output_dir / f"{args.name}_runtime_phases.tsv", sep="\t", index=False)
     for k, t in tables.items():
         if k != "pca_curves" and len(t):
             t.to_csv(args.output_dir / f"{args.name}_{k}.tsv", sep="\t", index=False)

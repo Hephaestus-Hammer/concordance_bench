@@ -242,3 +242,51 @@ def _category_legend(fig, order):
     handles = [plt.Line2D([], [], marker="o", ls="", color=colour(c)) for c in order]
     fig.legend(handles, order, frameon=False, fontsize=7, loc="outside lower center",
                ncol=min(len(order), 5), title="what differs", title_fontsize=7)
+
+
+PHASE_COLOURS = {"load": "#2a78d6", "write": "#1baf7a", "(unphased)": "#b0afab"}
+_PHASE_EXTRA = ["#eb6834", "#8a5cd6", "#c9962a", "#d63a7a", "#2aa3b3"]
+
+
+def _phase_colour(p, cache={}):
+    if p in PHASE_COLOURS:
+        return PHASE_COLOURS[p]
+    if p not in cache:
+        cache[p] = _PHASE_EXTRA[len(cache) % len(_PHASE_EXTRA)]
+    return cache[p]
+
+
+def runtime_phases(ph, size, allocated=None):
+    """One row per stage and module that logged phases. Left: median wall time per phase,
+    "(unphased)" first, then the phases in the order the module runs them. Right: median mean cores used per phase,
+    with the stage's allocated cores as a tick."""
+    sub = ph[ph["size"] == size]
+    if not len(sub):
+        return None
+    # unphased first: most of it is start-up and imports, before the first phase
+    order = ["(unphased)", *dict.fromkeys(p for p in sub["phase"] if p != "(unphased)")]
+    stage_o = {s: i for i, s in enumerate(STAGE_ORDER)}
+    rows = sorted({(s, m) for s, m in zip(sub["stage"], sub["module"])},
+                  key=lambda x: (stage_o.get(x[0], 9), x[1]))
+    med = sub.groupby(["stage", "module", "phase"])[["duration_s", "mean_cores"]].median()
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(9.5, 0.45 * len(rows) + 1.4), constrained_layout=True,
+                                 gridspec_kw={"width_ratios": [3, 2]}, sharey=True)
+    for y, (stage, module) in enumerate(rows):
+        left = 0.0
+        for p in order:
+            if (stage, module, p) not in med.index:
+                continue
+            d, c = med.loc[(stage, module, p)]
+            a1.barh(y, d, left=left, color=_phase_colour(p), height=0.6, edgecolor=SURFACE, linewidth=0.5)
+            left += d
+            a2.scatter(c, y, color=_phase_colour(p), s=22, zorder=3, edgecolor=SURFACE, linewidth=0.3)
+        if allocated and stage in allocated:
+            a2.vlines(allocated[stage], y - 0.3, y + 0.3, color=INK_2, ls="--", lw=1)
+    a1.set_yticks(range(len(rows)), [f"{s} · {m}" for s, m in rows], fontsize=7.5)
+    a1.set(ylim=(len(rows) - 0.5, -0.5), xlabel="wall time (s, median per phase)", title=size)
+    a2.set(xlabel="mean cores used (median; dashed = allocated)", xlim=(0, None))
+    for a in (a1, a2):
+        a.grid(axis="y", visible=False)
+    handles = [plt.Line2D([], [], marker="s", ls="", color=_phase_colour(p)) for p in order]
+    fig.legend(handles, order, frameon=False, fontsize=7, loc="outside lower center", ncol=len(order))
+    return fig
