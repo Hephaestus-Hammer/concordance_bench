@@ -15,6 +15,7 @@ dependencies:
 - polars >=1,<2
 - python-igraph >=0.11,<1
 - leidenalg >=0.10,<1
+- pynndescent ==0.6.0     # 0.7.0 returns csr_array, which scanpy 1.12.4 kNN cannot handle (getnnz)
 - denet ==0.10.3          # added here: modules/stage.sh runs each module script under denet
 - pip
 - pip:

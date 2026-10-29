@@ -9,6 +9,7 @@ python = "3.12.*"
 # analysis/
 numpy = "*"
 scipy = "*"
+conda = ">=24.7.1,<26"
 pandas = "*"
 scikit-learn = "*"
 anndata = "*"
@@ -20,6 +21,9 @@ denet = "==0.10.3"          # per-job CPU/memory/GPU traces
 [pypi-dependencies]
 omnibenchmark = "==0.7.0"              # the `ob` CLI; pinned because its CLI changes between releases
 snakemake-executor-plugin-slurm = "*"  # for profiles/slurm
+
+[activation.env]
+CONDA_PKGS_DIRS = "$PIXI_PROJECT_ROOT/.conda/pkgs"
 
 [tasks]
 validate = "ob validate plan benchmark.yaml"
