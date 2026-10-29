@@ -37,7 +37,7 @@ STAGE_OF_OUTPUT = {"embedding_tsv": "pca", "neighbors_h5": "knn", "clusters_tsv"
                    "rawdata_clusters_truth": "input"}
 FIELDS = ["s", "max_rss", "cpu_time", "peak_cores", "max_threads", "gpu_util_mean", "gpu_util_max",
           "gpu_mem_peak_mb", "source"]
-PHASE_FIELDS = ["duration_s", "cpu_s", "mean_cores", "peak_cores", "peak_rss_mb", "gpu_util_mean",
+PHASE_FIELDS = ["start_s", "duration_s", "cpu_s", "mean_cores", "peak_cores", "peak_rss_mb", "gpu_util_mean",
                 "gpu_mem_peak_mb", "samples"]
 
 
@@ -78,16 +78,25 @@ def read_denet(path):
 
 
 def read_phases(node_dir, trace):
-    """obkit.prof.attribute rows for one job, or [] if it logged no phases."""
+    """obkit.prof.attribute rows for one job, or [] if it logged no phases.
+
+    The logger appends, so an output directory that was run before (a failed attempt,
+    a rerun) holds phases from earlier processes too. Only phases that overlap this
+    trace are kept. start_s is the phase start in seconds since the trace began.
+    """
     path = Path(node_dir) / "obkit-events.jsonl"
     if trace is None or not path.exists():
         return []
     with warnings.catch_warnings():  # a killed job leaves an unmatched start; the rest still counts
         warnings.simplefilter("ignore")
         events = prof.load_events(path)
+    events = [e for e in events if e["end_ms"] > trace["t0_ms"] and e["start_ms"] < trace["end_ms"]]
     if not events:
         return []
-    return prof.attribute(events, trace)
+    rows = prof.attribute(events, trace)
+    for r in rows:
+        r["start_s"] = 0.0 if r["event"] == "(unphased)" else (r["start_ms"] - trace["t0_ms"]) / 1000.0
+    return rows
 
 
 def runtimes(df):
@@ -157,6 +166,12 @@ def summarise(rt):
     return out.dropna(axis=1, how="all")
 
 
+def phase_order(ph):
+    """{phase: rank}: "(unphased)" first, then by median start time across jobs."""
+    starts = ph[ph["phase"] != "(unphased)"].groupby("phase")["start_s"].median().sort_values()
+    return {"(unphased)": 0, **{p: i + 1 for i, p in enumerate(starts.index)}}
+
+
 def summarise_phases(ph, allocated=None):
     """Per size, stage, module and phase ("(unphased)" first, then the order the module
     runs them): jobs, median wall time, its share of the job, mean and peak cores, GPU."""
@@ -165,9 +180,8 @@ def summarise_phases(ph, allocated=None):
     ph = ph.copy()
     total = ph.groupby(["size", "stage", "pipeline"])["duration_s"].transform("sum")
     ph["share"] = 100 * ph["duration_s"] / total
-    order = {"(unphased)": 0}  # first, as in the figure: mostly start-up and imports
-    for p in ph["phase"]:
-        order.setdefault(p, len(order))
+    # "(unphased)" first (mostly start-up and imports), then phases by when they start
+    order = phase_order(ph)
     agg = {"jobs": ("duration_s", "count"), "wall time (s) median": ("duration_s", "median"),
            "share of job (%) median": ("share", "median"), "CPU time (s) median": ("cpu_s", "median"),
            "mean cores used median": ("mean_cores", "median"), "peak cores used max": ("peak_cores", "max"),

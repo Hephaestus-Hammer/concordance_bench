@@ -263,8 +263,9 @@ def runtime_phases(ph, size, allocated=None):
     sub = ph[ph["size"] == size]
     if not len(sub):
         return None
-    # unphased first: most of it is start-up and imports, before the first phase
-    order = ["(unphased)", *dict.fromkeys(p for p in sub["phase"] if p != "(unphased)")]
+    # unphased first: most of it is start-up and imports, before the first phase; then by start
+    starts = sub[sub["phase"] != "(unphased)"].groupby("phase")["start_s"].median().sort_values()
+    order = ["(unphased)", *starts.index]
     stage_o = {s: i for i, s in enumerate(STAGE_ORDER)}
     rows = sorted({(s, m) for s, m in zip(sub["stage"], sub["module"])},
                   key=lambda x: (stage_o.get(x[0], 9), x[1]))
