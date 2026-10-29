@@ -10,7 +10,10 @@ Every pair of runs is labelled by what differs between their lineages
 (`analysis/load.py`, `pair_category`):
 
 - the stages whose module or settings differ, joined by `+` (`pca`, `knn`,
-  `pca+knn`, `cluster`, …);
+  `pca+knn`, `cluster`, …); where exactly one stage differs, also the two modules
+  (`knn: nn-baseline vs nn-rapids`, module ids in alphabetical order; `knn:
+  nn-scanpy settings` for one module with different settings), so one library can
+  be compared with another at one stage (`analysis/load.py`, `pair_group`);
 - `seed: <stage>` if only random seeds differ, naming the stage(s) whose seed
   differs (`seed: pca`, `seed: knn`, `seed: cluster`): that stage's noise
   floor, measured at every downstream output;

@@ -24,7 +24,7 @@ CATEGORY_COLOURS = {
     "knn+cluster": "#d63a7a",
     "pca+knn+cluster": "#2aa3b3",
 }
-_EXTRA = plt.get_cmap("tab10").colors
+_EXTRA = [c for i, c in enumerate(plt.get_cmap("tab10").colors) if i != 7]  # no grey: grey = noise floor
 
 plt.rcParams.update({
     "font.size": 9, "axes.edgecolor": INK_2, "axes.labelcolor": INK, "text.color": INK,
@@ -35,17 +35,39 @@ plt.rcParams.update({
 })
 
 
+STAGE_ORDER = ["pca", "knn", "cluster"]
+
+
+def _category_key(c):
+    """Noise floors first, then one-stage groups in stage order, then multi-stage groups."""
+    head = c.split(":")[0]
+    if c == "replicate":
+        return (0, -1, c)
+    if c.startswith("seed"):
+        stage = c.split(": ", 1)[-1]
+        return (0, STAGE_ORDER.index(stage) if stage in STAGE_ORDER else 9, c)
+    if head in STAGE_ORDER:
+        return (1, STAGE_ORDER.index(head), c)
+    return (2, c.count("+"), c)
+
+
 def categories_in(values):
-    known = [c for c in CATEGORY_COLOURS if c in set(values)]
-    return known + sorted(set(values) - set(known))
+    return sorted(set(values), key=_category_key)
+
+
+_assigned = {}
 
 
 def colour(category):
+    """Fixed colours for the noise floors and the plain stage groups; the module-pair groups get
+    palette colours in the order first drawn, so a group keeps one colour across one report."""
     if category in CATEGORY_COLOURS:
         return CATEGORY_COLOURS[category]
     if category.startswith("seed"):
         return "#52514e"
-    return _EXTRA[hash(category) % len(_EXTRA)]
+    if category not in _assigned:
+        _assigned[category] = _EXTRA[len(_assigned) % len(_EXTRA)]
+    return _assigned[category]
 
 
 def _panels(n, width=4.2, height=3.4):
@@ -74,26 +96,29 @@ def pca_components(curves, sizes):
     return fig
 
 
-def by_category(pairs, sizes, col, ylabel):
-    """pairs: rows with size, category and a value column; one strip per category."""
+def by_category(pairs, sizes, col, xlabel):
+    """pairs: rows with size, category and a value column; one horizontal strip per group,
+    noise floors on top, then one-stage groups by stage, then multi-stage groups."""
     order = categories_in(pairs["category"])
-    fig, axes = plt.subplots(len(sizes), 1, figsize=(max(5.0, 0.75 * len(order) + 1.5), 2.9 * len(sizes)),
+    fig, axes = plt.subplots(len(sizes), 1, figsize=(7.5, (0.3 * len(order) + 1.1) * len(sizes)),
                              squeeze=False, constrained_layout=True)
     axes = axes[:, 0]
     rng = np.random.default_rng(0)  # jitter only
     for ax, size in zip(axes, sizes):
         sub = pairs[pairs["size"] == size]
-        for x, cat in enumerate(order):
+        for y, cat in enumerate(order):
             v = sub.loc[sub["category"] == cat, col].to_numpy(dtype=float)
             if len(v):
-                ax.scatter(x + rng.uniform(-0.25, 0.25, len(v)), v, s=10, color=colour(cat),
+                ax.scatter(v, y + rng.uniform(-0.25, 0.25, len(v)), s=10, color=colour(cat),
                            edgecolor=SURFACE, linewidth=0.3, alpha=0.8, zorder=3)
-                ax.hlines(np.median(v), x - 0.35, x + 0.35, color=INK, lw=1.4, zorder=4)
-        ax.set_xticks(range(len(order)), order if ax is axes[-1] else [""] * len(order),
-                      rotation=30, ha="right")
-        ax.set(xlim=(-0.6, len(order) - 0.4), title=size)
-        ax.grid(axis="x", visible=False)
-    fig.supylabel(ylabel, fontsize=9)
+                ax.vlines(np.median(v), y - 0.38, y + 0.38, color=INK, lw=1.4, zorder=4)
+        ax.set_yticks(range(len(order)), order, fontsize=7.5)
+        ax.set(ylim=(len(order) - 0.5, -0.5), title=size)
+        ax.grid(axis="y", visible=False)
+        for y in range(1, len(order)):  # a rule between the floors, one-stage and multi-stage blocks
+            if _category_key(order[y])[0] != _category_key(order[y - 1])[0]:
+                ax.axhline(y - 0.5, color=INK_2, lw=0.6)
+    axes[-1].set_xlabel(xlabel)
     return fig
 
 

@@ -34,7 +34,7 @@ import pandas as pd
 import concordance as cc
 import figures as fg
 import resources as rs
-from load import OUTPUTS, comparable, find, index, missing, pair_category, seed_variants
+from load import OUTPUTS, comparable, find, index, missing, pair_group, seed_variants
 
 DESCRIPTIONS = {
     "runs": """What the report was built from: the number of output files per stage and
@@ -45,7 +45,9 @@ DESCRIPTIONS = {
     "labels": """Pipelines are named by their module ids from PCA on
         (<code>pc-… &gt; nn-… &gt; cl-…</code>). A pair of runs is grouped by <b>what differs</b>
         between them: the stages whose module or settings differ (<code>pca</code>,
-        <code>knn</code>, <code>pca+knn</code>, …); <code>seed: &lt;stage&gt;</code> if only that
+        <code>knn</code>, <code>pca+knn</code>, …); where exactly one stage differs, the group also names
+        the two modules (<code>knn: nn-baseline vs nn-rapids</code>), so one library can be compared with
+        another at one stage; <code>seed: &lt;stage&gt;</code> if only that
         stage's random seed differs, which is that stage's noise floor; or <code>replicate</code>
         if only the input replicate differs. Noise-floor groups are grey; colours are the same
         in every figure. Only like-for-like pairs are compared: seed pairs differ in exactly one
@@ -64,10 +66,10 @@ DESCRIPTIONS = {
         cells of the shared-neighbour fraction: of each cell's <i>k</i> nearest neighbours (the cell
         itself not counted), the share found in both graphs. Modules store different numbers of
         neighbours (scanpy keeps 14 on its exact path but 15 on its approximate one for
-        <code>n_neighbors=15</code>), so <i>k</i> is the smaller of the two; the table shows both. <code>knn</code> pairs
-        share their PCA input, so they show the kNN step's own effect; <code>pca</code> pairs use
-        the same kNN module on different PCA outputs, so they show what PCA differences carry
-        into the graph. The table gives min, median and max per group, plus the share of cells whose neighbour
+        <code>n_neighbors=15</code>), so <i>k</i> is the smaller of the two; the table shows both. <code>knn: …</code> pairs
+        share their PCA input, so they show the kNN step's own effect, one pair of kNN modules per
+        row; <code>pca: …</code> pairs use the same kNN module on different PCA outputs, so they show
+        what PCA differences carry into the graph. The table gives min, median and max per group, plus the share of cells whose neighbour
         sets are identical; every pair is in the TSV.""",
     "ari": """Each point is one pair of Leiden clusterings of the same cells, measured by the
         adjusted Rand index (ARI; 1 = identical partitions, about 0 = chance), grouped by what
@@ -145,7 +147,7 @@ def compute(df):
             return basis[(i, k)]
 
         for i, j, a, b in pairs(by["embedding_tsv"]):
-            pair, cat = f"{a['label']}  vs  {b['label']}", pair_category(a["nodes"], b["nodes"])
+            pair, cat = f"{a['label']}  vs  {b['label']}", pair_group(a["nodes"], b["nodes"])
             t["pca_curves"].append({"size": size, "pair": pair, "category": cat,
                                     "values": cc.pca_one_minus_abs_cos(emb[i], emb[j])})
             row = {"size": size, "pair": pair, "category": cat}
@@ -172,7 +174,7 @@ def compute(df):
             k = min(ka, kb)
             frac = cc.knn_shared_fraction(graphs[i], graphs[j], k=k, n1=nn(i, k), n2=nn(j, k))
             t["knn"].append({"size": size, "pair": f"{a['label']}  vs  {b['label']}",
-                             "category": pair_category(a["nodes"], b["nodes"]),
+                             "category": pair_group(a["nodes"], b["nodes"]),
                              "neighbours stored": f"{ka} / {kb}", "k compared": min(ka, kb),
                              "mean_shared": float(frac.mean()),
                              "cells_identical": float((frac == 1).mean())})
@@ -184,7 +186,7 @@ def compute(df):
         labels = [cc.codes(lab) for lab in labels]  # integer codes: fast ARI
         for i, j, a, b in pairs(by["clusters_tsv"]):
             t["ari"].append({"size": size, "a": a["label"], "b": b["label"],
-                             "category": pair_category(a["nodes"], b["nodes"]),
+                             "category": pair_group(a["nodes"], b["nodes"]),
                              "ari": cc.ari(labels[i], labels[j])})
         if len(by["rawdata_clusters_truth"]):
             truth = cc.read_truth(by["rawdata_clusters_truth"]["path"].iloc[0]).reindex(order)
