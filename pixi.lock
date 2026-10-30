@@ -285,7 +285,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/4f/a7/aeedb5140afa41fc74c225e9184ab96723a6e873b6ee1c9fede7283456d8/markupsafe-3.0.4-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/1a/69/ee613f74085ca7103f79cd08d579c4f3177d1d26e5d3d9528d2d6536a707/nbformat-5.11.1-py3-none-any.whl
-      - pypi: git+https://github.com/Hephaestus-Hammer/obkit.git?subdirectory=python&rev=b309e4bdc37872203e3699416ace8481686f05d9#b309e4bdc37872203e3699416ace8481686f05d9
+      - pypi: git+https://github.com/Hephaestus-Hammer/obkit.git?subdirectory=python&rev=ce93f57f807e70ee7f4ab021c54d99e08346efd4#ce93f57f807e70ee7f4ab021c54d99e08346efd4
       - pypi: https://files.pythonhosted.org/packages/ad/d5/1e39ed0680217501fb9170c5f3f37fb0cb626adfaf4e96ffa7ada485bab5/omnibenchmark-0.7.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f1/d9/7fb5aa316bc299258e68c73ba3bddbc499654a07f151cba08f6153988714/pathspec-1.1.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b5/55/fdd01894807d20fb6181f13590ae247585b10e909b42e6ada833379fe520/plumbum-2.0.2-py3-none-any.whl
@@ -2797,7 +2797,7 @@ packages:
   - pkg:pypi/numpy?source=compressed-mapping
   size: 9240540
   timestamp: 1791675329565
-- pypi: git+https://github.com/Hephaestus-Hammer/obkit.git?subdirectory=python&rev=b309e4bdc37872203e3699416ace8481686f05d9#b309e4bdc37872203e3699416ace8481686f05d9
+- pypi: git+https://github.com/Hephaestus-Hammer/obkit.git?subdirectory=python&rev=ce93f57f807e70ee7f4ab021c54d99e08346efd4#ce93f57f807e70ee7f4ab021c54d99e08346efd4
   name: obkit
   version: 0.0.3
   requires_dist:

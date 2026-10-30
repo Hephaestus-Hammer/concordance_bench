@@ -22,7 +22,7 @@ denet = "==0.10.3"          # per-job CPU/memory/GPU traces
 omnibenchmark = "==0.7.0"              # the `ob` CLI; pinned because its CLI changes between releases
 snakemake-executor-plugin-slurm = "*"  # for profiles/slurm
 # analysis/resources.py: denet traces and per-phase attribution (obkit.prof); the fork until it is upstream
-obkit = { git = "https://github.com/Hephaestus-Hammer/obkit.git", rev = "b309e4bdc37872203e3699416ace8481686f05d9", subdirectory = "python" }
+obkit = { git = "https://github.com/Hephaestus-Hammer/obkit.git", rev = "ce93f57f807e70ee7f4ab021c54d99e08346efd4", subdirectory = "python" }
 
 [activation.env]
 CONDA_PKGS_DIRS = "$PIXI_PROJECT_ROOT/.conda/pkgs"
