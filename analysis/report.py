@@ -93,8 +93,10 @@ DESCRIPTIONS = {
         bounds and they have no peak cores; the table says which source each row uses. All of it covers
         the whole module call, including Python start-up, imports and reading and writing files;
         every job is a fresh process, so one-off costs such as numba compiling pynndescent (around
-        10&nbsp;s) are in every scanpy kNN job. GPU memory is the job's own where NVML reports it,
-        otherwise the whole device's. The dashed line
+        10&nbsp;s) are in every scanpy kNN job. GPU utilisation and memory are the job's own where NVML can see
+        the process, otherwise the whole device's (on wimbledon NVML usually cannot match the
+        process, so read them as "the GPU while this job ran"; the device's baseline memory is
+        included). The dashed line
         is the cores the stage gets in <code>benchmark.yaml</code>: a mean well below it with a peak near it
         means short multi-threaded bursts; a peak above it means the module starts more threads than it
         was given. The traces below show cores over time, one line per job, so runs that finish early

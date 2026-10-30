@@ -159,8 +159,9 @@ def summarise(rt):
            "mean cores used median": ("cores used", "median"),
            "peak cores used median": ("peak_cores", "median"),
            "threads (max)": ("max_threads", "max"), "cores allocated": ("cores allocated", "first")}
-    if rt["gpu_util_mean"].notna().any():
+    if rt["gpu_util_mean"].notna().any() or rt["gpu_mem_peak_mb"].notna().any():
         agg.update({"GPU utilisation % (mean) median": ("gpu_util_mean", "median"),
+                    "GPU utilisation % (max) max": ("gpu_util_max", "max"),
                     "GPU memory (MB, peak) median": ("gpu_mem_peak_mb", "median")})
     out = rt.groupby(["size", "stage", "module"]).agg(**agg).reset_index()
     return out.dropna(axis=1, how="all")
@@ -186,7 +187,7 @@ def summarise_phases(ph, allocated=None):
            "share of job (%) median": ("share", "median"), "CPU time (s) median": ("cpu_s", "median"),
            "mean cores used median": ("mean_cores", "median"), "peak cores used max": ("peak_cores", "max"),
            "samples (min)": ("samples", "min")}
-    if ph["gpu_util_mean"].notna().any():
+    if ph["gpu_util_mean"].notna().any() or ph["gpu_mem_peak_mb"].notna().any():
         agg.update({"GPU utilisation % (mean) median": ("gpu_util_mean", "median"),
                     "GPU memory (MB, peak) max": ("gpu_mem_peak_mb", "max")})
     out = ph.groupby(["size", "stage", "module", "phase"]).agg(**agg).reset_index()
