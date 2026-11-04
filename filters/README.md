@@ -7,6 +7,7 @@ prunes the DAG to the picked stages, modules and parameter combinations.
 |---|---|---|
 | `smoke.yaml` | 10k, CPU modules (scanpy defaults + baseline), seed 0: 8 combinations | any |
 | `smoke-gpu.yaml` | 10k, every module, seed 0: 27 combinations | GPU |
+| `scaling-gpu.yaml` | 50k and 100k, every module, seed 0: 54 combinations | GPU |
 | `cpu-only.yaml` | all sizes, CPU modules, seed 0 | any |
 | `noise-pca.yaml` | all sizes, CPU modules: 20 arpack PCA seeds, seed 0 downstream | any |
 | `noise-knn.yaml` | all sizes, CPU modules: 20 pynndescent kNN seeds, seed 0 elsewhere | any |

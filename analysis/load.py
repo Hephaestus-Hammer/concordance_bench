@@ -187,6 +187,24 @@ def _at_base_seed(nodes, base):
     return all(n.seeds == base[(n.stage, n.module, n.settings)] for n in nodes)
 
 
+def pair_group(a, b):
+    """pair_category, split by module where exactly one stage differs.
+
+    'knn' becomes 'knn: nn-baseline vs nn-rapids' (module ids in alphabetical order),
+    so library against library at one stage can be read off directly; the same
+    module with different settings becomes 'knn: nn-scanpy settings'. Seed,
+    replicate and multi-stage groups ('pca+knn', ...) are unchanged.
+    """
+    cat = pair_category(a, b)
+    if "+" in cat or cat.startswith("seed") or cat in ("replicate", "identical"):
+        return cat
+    x, y = next((x, y) for x, y in zip(a[1:], b[1:]) if x.stage == cat)
+    if x.module == y.module:
+        return f"{cat}: {x.module} settings"
+    m1, m2 = sorted((x.module, y.module))
+    return f"{cat}: {m1} vs {m2}"
+
+
 def missing(df, output):
     """Combinations that should exist for `output` but don't, per size.
 

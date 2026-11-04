@@ -1,0 +1,21 @@
+# obfilter (seed 0 only): the 50k and 100k rungs, every module combination, on a GPU host.
+# smoke-gpu.yaml at 50k and 100k: whether the CPU modules use the cores they are given and the
+# GPU modules the GPU, once the data is big enough for the work to outweigh start-up.
+picks:
+  data:
+    hao2021_50k: all
+    hao2021_100k: all
+  input:
+    hao_input: all
+  pca:
+    pc-scanpy: first
+    pc-baseline: all
+    pc-rapids: all
+  knn:
+    nn-scanpy: first
+    nn-baseline: all
+    nn-rapids: all
+  cluster:
+    cl-scanpy: first
+    cl-baseline: first
+    cl-rapids: first

@@ -36,16 +36,28 @@ agreement is the noise floor** against which other pipelines (scanpy defaults,
 rapids-singlecell, other kNN libraries and builds) are judged.
 
 **Status:** `omni-scrna/scanpy` does not yet expose `covariance_eigh`, exact kNN
-or `n_iterations`. The baseline modules (`pc-baseline`, `nn-baseline`,
-`cl-baseline`) therefore run the
+or `n_iterations`, and its `knn.py` and `cluster.py` log no phases. All scanpy
+modules (defaults and baseline) therefore run the
 [`Hephaestus-Hammer/scanpy`](https://github.com/Hephaestus-Hammer/scanpy/tree/baseline-options)
-fork, which adds them; the plan moves back to `omni-scrna/scanpy` once they are
-merged upstream.
+fork, which adds them: upstream `b98b70b` plus options and phase logging, with
+upstream's defaults unchanged. The plan moves back to `omni-scrna/scanpy` once
+they are merged upstream.
 
 ## Setup
 
 The environment is managed with [pixi](https://pixi.sh) and pins `ob`, denet and
-the analysis stack in `pixi.lock`.
+the analysis stack in `pixi.lock`. The same lock holds the module environments
+(`[feature.data]`, `[feature.scanpy]`, `[feature.rapids]` in `pixi.toml`); ob reads
+them as `envs/<env>.yml`, generated from the lock with every package at an exact
+version and build. After changing a module dependency:
+
+```sh
+pixi lock              # re-solve and update pixi.lock
+pixi run lock-envs     # re-generate envs/*.yml from it
+```
+ obkit, which parses the denet traces, comes from
+the [Hephaestus-Hammer/obkit](https://github.com/Hephaestus-Hammer/obkit) fork at a
+fixed commit until `obkit.prof` is upstream.
 
 ```sh
 pixi install
@@ -73,10 +85,21 @@ data -> input (hao_input) -> pca -> knn -> cluster
 Every module consumes every upstream output, so implementations mix (e.g. rapids
 PCA -> baseline kNN -> scanpy Leiden): 27 combinations per size, 81 in all (8 per
 size on a CPU host). That is what attributes disagreement to a stage. The
-scanpy-defaults and rapids modules are
-[omni-scrna/scanpy](https://github.com/omni-scrna/scanpy) and
-[omni-scrna/rapids-singlecell](https://github.com/omni-scrna/rapids-singlecell),
-run unchanged.
+scanpy modules run the fork above (upstream
+[omni-scrna/scanpy](https://github.com/omni-scrna/scanpy) plus options and phase
+logging), the rapids modules
+[omni-scrna/rapids-singlecell](https://github.com/omni-scrna/rapids-singlecell)
+unchanged.
+
+Every PCA, kNN and Leiden module runs through this repo's `stage` entrypoint
+(`modules/stage.sh`), the approach of sc-brrr's `prof.sh`: the module is a
+parameter (`module: <git url>@<commit>`, `script: pca.py`), checked out once per
+commit into `~/.cache/concordance_bench/modules`, and its script runs unchanged
+under [denet](https://github.com/btraven00/denet), which writes `denet.jsonl`
+(CPU, memory, threads, GPU) and `module.log` next to the job's outputs. denet is
+added to `envs/scanpy.yml` and `envs/rapids.yml`. A wrapper is needed because
+ob 0.7.0 runs the modules' own `-prof` entrypoints (`denet pca.py`) as
+`python3 denet pca.py`.
 
 Seeded modules (arpack PCA, pynndescent kNN, every Leiden) list seeds 0-19. The
 noise floor is measured one stage at a time: `filters/noise-*.yaml` vary one
@@ -102,7 +125,15 @@ pixi run report        # every metric and figure in one file: results/report/con
 ```
 
 The report also writes one TSV per table next to the HTML. It reads `out/` and
-never writes into it.
+never writes into it. Its Runtime tab shows per job: wall time, mean and peak
+cores used against the cores the stage is given, peak memory, GPU use, and cores
+over time. Where a module logs phases with obkit's logger (`obkit-events.jsonl`),
+it also splits each job into those phases (load, compute, write, ...) plus the
+unphased start-up and imports, with wall time and cores used per phase
+(`concordance_runtime_phases.tsv`). It reads each job's denet trace
+(`denet.jsonl`, see below) with `obkit.prof` and falls back to the
+`performance.txt` ob writes next to every job; Snakemake samples that sparsely
+after a job's first 15 s, so its CPU time and memory are lower bounds.
 The data stage downloads from Hugging Face, so the host running it needs network
 access.
 
@@ -144,12 +175,14 @@ concordance-bench/
 │   └── cpu-only.yaml
 ├── envs/                      # one conda env per software_environment in the plan
 │   ├── data.yml               #   omni-huggingface (data download)
-│   ├── scanpy.yml             #   omni-scrna/scanpy; also runs hao_input
-│   └── rapids.yml             #   omni-scrna/rapids-singlecell (CUDA 13)
+│   ├── scanpy.yml             #   omni-scrna/scanpy and the fork + denet; also runs hao_input
+│   └── rapids.yml             #   rapids-singlecell 0.18.1 (CUDA 13) + denet
+│                              #   all three generated from pixi.lock (pixi run lock-envs)
 │
 ├── omnibenchmark.yaml         # entrypoints for this repo's own modules (below)
 ├── modules/
 │   ├── hao_input.py           # Hao .h5ad -> feature-selection output format + truth labels
+│   ├── stage.sh               # entrypoint `stage`: a module's script, unchanged, under denet
 │   └── concordance.py         # later: pairwise metric stage (once proven in analysis/)
 │
 ├── profiles/
@@ -158,7 +191,7 @@ concordance-bench/
 ├── analysis/                  # offline: reads the ob output tree, never writes into it
 │   ├── load.py                #   finds runs in out/: stage, module, parameters, seed
 │   ├── concordance.py         #   PCA |cos| and subspace, kNN overlap, ARI between runs and seeds
-│   ├── resources.py           #   parses denet traces: CPU, memory, GPU over time per job
+│   ├── resources.py           #   runtime, cores, memory, GPU per job and phase (obkit.prof)
 │   ├── figures.py             #   one function per report figure
 │   └── report.py              #   all of the above in one self-contained HTML file
 │
@@ -173,7 +206,7 @@ concordance-bench/
 └── out/                       # gitignored: ob writes here
 ```
 
-Not written yet: `modules/concordance.py`, `analysis/resources.py` and `LICENSE`.
+Not written yet: `modules/concordance.py` and `LICENSE`.
 
 ## Citation
 

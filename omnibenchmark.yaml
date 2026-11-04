@@ -1,3 +1,4 @@
 # Entrypoints for this repository's own modules, referenced from benchmark.yaml.
 entrypoints:
   hao_input: modules/hao_input.py
+  stage: modules/stage.sh   # run a module's script (--module <url>@<commit> --script <file>) under denet

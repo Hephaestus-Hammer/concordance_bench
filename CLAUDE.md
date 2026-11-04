@@ -42,12 +42,22 @@ pipelines (scanpy, rapids) across runs and seeds, plus resource use per job.
   `ob run` goes through a filter. Same-seed replicates (non-seed noise such as
   GPU atomics) will be separate `ob run`s into separate output folders, merged in
   `analysis/`, instead of `hao_input`'s `replicate` parameter (Ben's suggestion).
-- **Baseline on a fork.** `pc-/nn-/cl-baseline` pin `Hephaestus-Hammer/scanpy`
-  (branch `baseline-options`), which adds `covariance_eigh`, `--transformer` and
-  `--n_iterations` to omni-scrna/scanpy. Move them back to `omni-scrna/scanpy`
-  once those are merged upstream. `knn.py` and `cluster.py` have no BLAS thread
-  setting yet, so only the baseline PCA is single-threaded.
-- **Environment pinning.** `envs/` are the modules' own exports with loose version
-  ranges. Lock them to exact builds (as sc-brrr does) before comparing results.
-- **Resource traces.** No denet traces yet: the modules' `*-prof` entrypoints and
-  denet in each environment are needed for `analysis/resources.py`.
+- **scanpy modules on a fork.** `pc-/nn-/cl-baseline`, and for phase logging also
+  `pc-/nn-/cl-scanpy`, pin `Hephaestus-Hammer/scanpy` (branch `baseline-options`),
+  which adds `covariance_eigh`, `--transformer`, `--n_iterations`, `--blas_threads`
+  and load/compute/write phases to omni-scrna/scanpy, with upstream's defaults. Move them back to `omni-scrna/scanpy`
+  once those are merged upstream. The fork's `knn.py` and `cluster.py` have
+  `--blas_threads` too, so every baseline stage runs with 1 BLAS thread.
+- **Environment pinning.** The module environments are pixi environments
+  (`[feature.data|scanpy|rapids]` in `pixi.toml`), locked in `pixi.lock`.
+  `envs/<env>.yml`, which ob reads, are generated from the lock with
+  `pixi run lock-envs`: exact conda builds and PyPI versions. Change a dependency
+  in `pixi.toml`, then `pixi lock` and `pixi run lock-envs`; never edit `envs/`.
+  rapids-singlecell is 0.18.1, newer than the module's 0.16.1 pin
+  (`docs/decisions.md`).
+- **Resource traces.** Every PCA, kNN and Leiden module runs through the `stage`
+  entrypoint (`modules/stage.sh`, like sc-brrr's `prof.sh`): the module is the
+  `module` parameter (`<url>@<commit>`), its script `script`; the script runs
+  unchanged under denet (`<output_dir>/denet.jsonl`, `module.log`). Changing a
+  module means changing its `module` parameter. Jobs without a trace fall back to
+  Snakemake's `performance.txt` (sparse sampling: lower bounds).
