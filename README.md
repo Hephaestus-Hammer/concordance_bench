@@ -36,11 +36,12 @@ agreement is the noise floor** against which other pipelines (scanpy defaults,
 rapids-singlecell, other kNN libraries and builds) are judged.
 
 **Status:** `omni-scrna/scanpy` does not yet expose `covariance_eigh`, exact kNN
-or `n_iterations`. The baseline modules (`pc-baseline`, `nn-baseline`,
-`cl-baseline`) therefore run the
+or `n_iterations`, and its `knn.py` and `cluster.py` log no phases. All scanpy
+modules (defaults and baseline) therefore run the
 [`Hephaestus-Hammer/scanpy`](https://github.com/Hephaestus-Hammer/scanpy/tree/baseline-options)
-fork, which adds them; the plan moves back to `omni-scrna/scanpy` once they are
-merged upstream.
+fork, which adds them: upstream `b98b70b` plus options and phase logging, with
+upstream's defaults unchanged. The plan moves back to `omni-scrna/scanpy` once
+they are merged upstream.
 
 ## Setup
 
@@ -75,10 +76,11 @@ data -> input (hao_input) -> pca -> knn -> cluster
 Every module consumes every upstream output, so implementations mix (e.g. rapids
 PCA -> baseline kNN -> scanpy Leiden): 27 combinations per size, 81 in all (8 per
 size on a CPU host). That is what attributes disagreement to a stage. The
-scanpy-defaults and rapids modules are
-[omni-scrna/scanpy](https://github.com/omni-scrna/scanpy) and
-[omni-scrna/rapids-singlecell](https://github.com/omni-scrna/rapids-singlecell),
-run unchanged.
+scanpy modules run the fork above (upstream
+[omni-scrna/scanpy](https://github.com/omni-scrna/scanpy) plus options and phase
+logging), the rapids modules
+[omni-scrna/rapids-singlecell](https://github.com/omni-scrna/rapids-singlecell)
+unchanged.
 
 Every PCA, kNN and Leiden module runs through this repo's `stage` entrypoint
 (`modules/stage.sh`), the approach of sc-brrr's `prof.sh`: the module is a

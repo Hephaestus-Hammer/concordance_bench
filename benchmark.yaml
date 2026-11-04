@@ -25,7 +25,7 @@ api_version: "0.7.0"
 software_backend: conda
 software_environments:
   data: {conda: envs/data.yml}       # omnibenchmark/omni-huggingface
-  scanpy: {conda: envs/scanpy.yml}   # omni-scrna/scanpy; also runs hao_input
+  scanpy: {conda: envs/scanpy.yml}   # omni-scrna/scanpy and the fork; also runs hao_input
   rapids: {conda: envs/rapids.yml}   # omni-scrna/rapids-singlecell (CUDA 13)
 
 stages:
@@ -85,7 +85,7 @@ stages:
         software_environment: scanpy
         repository: &stage {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: 52c8c6466e394179cb12fd63972dce27731b7ada, entrypoint: stage}
         parameters:
-          - {module: &m_scanpy "https://github.com/omni-scrna/scanpy@b98b70b7cd72be784356045f825d48a1a7dc9365", script: pca.py, solver: arpack, n_components: 50, dtype: float64, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
+          - {module: &m_scanpy "https://github.com/Hephaestus-Hammer/scanpy@e19c1c0ec2600671bf1e3e2d7aa103081b1654be", script: pca.py, solver: arpack, n_components: 50, dtype: float64, random_seed: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}
       # The blessed baseline (README): deterministic, single-threaded BLAS. Its module is the
       # Hephaestus-Hammer/scanpy fork (branch baseline-options), which exposes covariance_eigh,
       # exact kNN and n_iterations; back to omni-scrna/scanpy once merged upstream.
