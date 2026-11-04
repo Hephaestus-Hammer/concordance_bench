@@ -24,9 +24,10 @@ api_version: "0.7.0"
 
 software_backend: conda
 software_environments:
+  # generated from pixi.lock by `pixi run lock-envs` ([feature.<env>] in pixi.toml)
   data: {conda: envs/data.yml}       # omnibenchmark/omni-huggingface
   scanpy: {conda: envs/scanpy.yml}   # omni-scrna/scanpy and the fork; also runs hao_input
-  rapids: {conda: envs/rapids.yml}   # omni-scrna/rapids-singlecell (CUDA 13)
+  rapids: {conda: envs/rapids.yml}   # rapids-singlecell 0.18.1 (CUDA 13)
 
 stages:
   # The published sc-brrr input (huggingface.co/datasets/btraven/sc-brrr-hao2021), pinned to a

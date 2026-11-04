@@ -46,7 +46,16 @@ they are merged upstream.
 ## Setup
 
 The environment is managed with [pixi](https://pixi.sh) and pins `ob`, denet and
-the analysis stack in `pixi.lock`. obkit, which parses the denet traces, comes from
+the analysis stack in `pixi.lock`. The same lock holds the module environments
+(`[feature.data]`, `[feature.scanpy]`, `[feature.rapids]` in `pixi.toml`); ob reads
+them as `envs/<env>.yml`, generated from the lock with every package at an exact
+version and build. After changing a module dependency:
+
+```sh
+pixi lock              # re-solve and update pixi.lock
+pixi run lock-envs     # re-generate envs/*.yml from it
+```
+ obkit, which parses the denet traces, comes from
 the [Hephaestus-Hammer/obkit](https://github.com/Hephaestus-Hammer/obkit) fork at a
 fixed commit until `obkit.prof` is upstream.
 
@@ -166,8 +175,9 @@ concordance-bench/
 │   └── cpu-only.yaml
 ├── envs/                      # one conda env per software_environment in the plan
 │   ├── data.yml               #   omni-huggingface (data download)
-│   ├── scanpy.yml             #   omni-scrna/scanpy + denet; also runs hao_input
-│   └── rapids.yml             #   omni-scrna/rapids-singlecell (CUDA 13) + denet
+│   ├── scanpy.yml             #   omni-scrna/scanpy and the fork + denet; also runs hao_input
+│   └── rapids.yml             #   rapids-singlecell 0.18.1 (CUDA 13) + denet
+│                              #   all three generated from pixi.lock (pixi run lock-envs)
 │
 ├── omnibenchmark.yaml         # entrypoints for this repo's own modules (below)
 ├── modules/
