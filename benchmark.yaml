@@ -94,7 +94,7 @@ stages:
         software_environment: scanpy
         repository: *stage
         parameters:
-          - {module: &m_baseline "https://github.com/Hephaestus-Hammer/scanpy@d9535dc8c8ab5c84d925be230d858b23c2b15b89", script: pca.py, solver: covariance_eigh, n_components: 50, dtype: float64, blas_threads: 1, random_seed: 0}
+          - {module: &m_baseline "https://github.com/Hephaestus-Hammer/scanpy@e19c1c0ec2600671bf1e3e2d7aa103081b1654be", script: pca.py, solver: covariance_eigh, n_components: 50, dtype: float64, blas_threads: 1, random_seed: 0}
       - id: pc-rapids
         name: "rapids-singlecell PCA (covariance eigh, GPU)"
         software_environment: rapids
