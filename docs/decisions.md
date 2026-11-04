@@ -8,7 +8,7 @@ record. Every non-default setting in `benchmark.yaml` gets an entry here.
 
 "scanpy defaults" is what the `pc-scanpy`, `nn-scanpy` and `cl-scanpy` modules
 run now: `omni-scrna/scanpy@b98b70b`'s code paths, through the
-`Hephaestus-Hammer/scanpy@e19c1c0` fork (same defaults; adds options and phase
+`Hephaestus-Hammer/scanpy@1c8e86e` fork (same defaults; adds options and phase
 logging).
 
 | Stage | Setting | scanpy defaults | Blessed | Why |
