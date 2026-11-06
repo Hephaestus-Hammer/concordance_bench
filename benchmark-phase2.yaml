@@ -1,0 +1,247 @@
+# concordance-bench Phase 2 (docs/phase2-plan.md): accuracy, stability and cost of PCA x kNN x
+# Leiden pipelines across datasets and sizes. Phase 1 (benchmark.yaml) stays frozen as it was.
+#
+# Never run without a filter: every seed and resolution list expands against every other.
+# The three slices (filters/phase2/, made by scripts/make_filters.py) vary one stage at a time
+# against the exact baselines:
+#   slice-cluster  exact PCA + exact kNN -> every Leiden x 5 resolutions x 5 seeds
+#   slice-knn      exact PCA -> every kNN x its seeds -> baseline Leiden, seed 0, 5 resolutions
+#   slice-pca      every PCA x its seeds -> exact kNN -> baseline Leiden, seed 0, 5 resolutions
+# and five named end-to-end pipelines with matched seeds (seed i at every seeded stage):
+#   pipelines/     baseline, scanpy-defaults, tuned-cpu, all-gpu, hybrid (one filter per pipeline
+#                  and seed: scripts/run_pipelines.sh runs them all)
+# Every Leiden runs at all 5 resolutions, so the analysis picks each pipeline's oracle
+# resolution afterwards (best median accuracy over seeds) without a second round of runs.
+# 5 seeds per seeded module for now: more is a change to the seed lists below.
+#
+# Before running: fill the CHANGE_ME values (the fork commit with patch 1, this repository's
+# commit with patch 2, the four datasets' Hugging Face revisions; docs/datasets.md).
+id: concordance_bench_phase2
+name: concordance-bench phase 2
+description: Accuracy, stability and cost of scanpy, baseline and rapids-singlecell pipelines across datasets and sizes
+benchmarker: "CHANGE_ME <CHANGE_ME>"
+version: "0.2.0"
+api_version: "0.7.0"
+
+software_backend: conda
+software_environments:
+  data: {conda: envs/data.yml}
+  scanpy: {conda: envs/scanpy.yml}
+  rapids: {conda: envs/rapids.yml}
+
+stages:
+  # Whole datasets, preprocessed once by scripts/publish_dataset.py (log1p CP10k, 2,000 HVGs,
+  # labels in obs.label) and pinned to a Hugging Face revision. Hao's sc-brrr 100k rung already
+  # has that form and serves as Hao's whole dataset.
+  - id: data
+    outputs:
+      - {id: data_h5ad, path: "{name}.h5ad"}
+    modules:
+      - id: hao2021
+        software_environment: data
+        repository: &hf {url: https://github.com/omnibenchmark/omni-huggingface, commit: dd042df5956fff3a022dde98a0fffa3e5517c503}
+        parameters:
+          - {repo: btraven/sc-brrr-hao2021, repo_type: dataset, revision: a61cd45f32445b9a84b6e003d64e463712fbf5af,
+             files: hao2021_100k.h5ad, sha256: a8cbaaeef5651f699e11dd3719681488b3470b3bd8d8209070bf5cad466f81ad}
+      - id: pancreas
+        software_environment: data
+        repository: *hf
+        parameters:
+          - {repo: CHANGE_ME, repo_type: dataset, revision: CHANGE_ME, files: pancreas.h5ad, sha256: CHANGE_ME}
+      - id: tm-facs
+        software_environment: data
+        repository: *hf
+        parameters:
+          - {repo: CHANGE_ME, repo_type: dataset, revision: CHANGE_ME, files: tm-facs.h5ad, sha256: CHANGE_ME}
+      - id: tm-droplet
+        software_environment: data
+        repository: *hf
+        parameters:
+          - {repo: CHANGE_ME, repo_type: dataset, revision: CHANGE_ME, files: tm-droplet.h5ad, sha256: CHANGE_ME}
+      - id: aifi-d1
+        software_environment: data
+        repository: *hf
+        parameters:
+          - {repo: CHANGE_ME, repo_type: dataset, revision: CHANGE_ME, files: aifi-d1.h5ad, sha256: CHANGE_ME}
+
+  # One module per subsample size: nested, label-stratified subsamples (modules/dataset_input.py).
+  # A size larger than a dataset excludes it; in-all is each dataset whole (Hao's whole is in-100k).
+  # Labelled cells per dataset (Ben's deck): pancreas 12,115 · tm-facs 44,104 · tm-droplet 54,865
+  # · Hao 100,000 · aifi-d1 149,737.
+  - id: input
+    inputs: [data_h5ad]
+    outputs:
+      - {id: normalized_selected_h5, path: "{name}_normalized_selected.h5"}
+      - {id: rawdata_clusters_truth, path: "{name}.clusters_truth.tsv"}
+    resources: {cores: 1, mem_mb: 16000}
+    modules:
+      - id: in-5k
+        software_environment: scanpy
+        repository: &input {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: CHANGE_ME, entrypoint: dataset_input}
+        parameters:
+          - {n_cells: 5000, replicate: 0}
+      - id: in-10k
+        software_environment: scanpy
+        repository: *input
+        parameters:
+          - {n_cells: 10000, replicate: 0}
+      - id: in-25k
+        software_environment: scanpy
+        repository: *input
+        exclude: [pancreas]
+        parameters:
+          - {n_cells: 25000, replicate: 0}
+      - id: in-50k
+        software_environment: scanpy
+        repository: *input
+        exclude: [pancreas, tm-facs]
+        parameters:
+          - {n_cells: 50000, replicate: 0}
+      - id: in-100k
+        software_environment: scanpy
+        repository: *input
+        exclude: [pancreas, tm-facs, tm-droplet]
+        parameters:
+          - {n_cells: 100000, replicate: 0}
+      - id: in-all
+        software_environment: scanpy
+        repository: *input
+        exclude: [hao2021]
+        parameters:
+          - {n_cells: 0, replicate: 0}
+
+  # Exact: covariance-eigh (CPU baseline, GPU), jacobi (GPU, dense). Approximate and seeded:
+  # randomized and lanczos, each on CPU (the fork, implicit centring on sparse input) and GPU
+  # (rapids-singlecell), so every approximate method has a CPU and a GPU implementation.
+  # arpack is scanpy's default.
+  - id: pca
+    inputs: [normalized_selected_h5]
+    outputs:
+      - {id: embedding_tsv, path: "{name}_embedding.tsv"}
+      - {id: loadings_tsv, path: "{name}_loadings.tsv"}
+    resources: {cores: 8, mem_mb: 16000}
+    modules:
+      - id: pc-baseline
+        name: "Baseline: PCA (covariance_eigh, float64, 1 BLAS thread)"
+        software_environment: scanpy
+        resources: {cores: 1, mem_mb: 16000}
+        repository: &stage {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: 52c8c6466e394179cb12fd63972dce27731b7ada, entrypoint: stage}
+        parameters:
+          - {module: &m_fork "https://github.com/Hephaestus-Hammer/scanpy@CHANGE_ME", script: pca.py, solver: covariance_eigh, n_components: 50, dtype: float64, blas_threads: 1, random_seed: 0}
+      - id: pc-scanpy
+        name: "scanpy defaults: PCA (arpack)"
+        software_environment: scanpy
+        repository: *stage
+        parameters:
+          - {module: *m_fork, script: pca.py, solver: arpack, n_components: 50, dtype: float64, random_seed: [0, 1, 2, 3, 4]}
+      - id: pc-randomized
+        name: "PCA, randomized (CPU, implicit centring, 1 BLAS thread)"
+        software_environment: scanpy
+        resources: {cores: 1, mem_mb: 16000}
+        repository: *stage
+        parameters:
+          - {module: *m_fork, script: pca.py, solver: randomized, n_components: 50, dtype: float64, blas_threads: 1, random_seed: [0, 1, 2, 3, 4]}
+      - id: pc-lanczos
+        name: "PCA, Lanczos bidiagonalisation (CPU, PROPACK, tol 1e-5, 1 BLAS thread)"
+        software_environment: scanpy
+        resources: {cores: 1, mem_mb: 16000}
+        repository: *stage
+        parameters:
+          - {module: *m_fork, script: pca.py, solver: lanczos, n_components: 50, dtype: float64, blas_threads: 1, random_seed: [0, 1, 2, 3, 4]}
+      - id: pc-rapids
+        name: "rapids-singlecell PCA (covariance eigh, GPU)"
+        software_environment: rapids
+        requires_capabilities: [gpu]
+        resources: {cores: 2, mem_mb: 16000}
+        repository: *stage
+        parameters:
+          - {module: &m_rapids "https://github.com/omni-scrna/rapids-singlecell@29b6614ca06b7aefb2d475377b5600f9dcd6fd64", script: pca.py, solver: covariance-eigh, n_components: 50, dtype: float64, random_seed: 0}
+      - id: pc-rapids-randomized
+        name: "rapids-singlecell PCA, randomized (Halko, GPU)"
+        software_environment: rapids
+        requires_capabilities: [gpu]
+        resources: {cores: 2, mem_mb: 16000}
+        repository: *stage
+        parameters:
+          - {module: *m_rapids, script: pca.py, solver: randomized-halko, n_components: 50, dtype: float64, random_seed: [0, 1, 2, 3, 4]}
+      - id: pc-rapids-lanczos
+        name: "rapids-singlecell PCA, Lanczos (GPU)"
+        software_environment: rapids
+        requires_capabilities: [gpu]
+        resources: {cores: 2, mem_mb: 16000}
+        repository: *stage
+        parameters:
+          - {module: *m_rapids, script: pca.py, solver: lanczos, n_components: 50, dtype: float64, random_seed: [0, 1, 2, 3, 4]}
+      - id: pc-rapids-jacobi
+        name: "rapids-singlecell PCA, Jacobi (GPU, dense input)"
+        software_environment: rapids
+        requires_capabilities: [gpu]
+        resources: {cores: 2, mem_mb: 32000}
+        repository: *stage
+        parameters:
+          - {module: *m_rapids, script: pca.py, solver: jacobi, dense: "true", n_components: 50, dtype: float64, random_seed: 0}
+
+  # Exact: sklearn brute force (baseline), cuVS brute force (rapids). Approximate and seeded:
+  # pynndescent on 1 thread (scanpy's default n_jobs) and on 8 (not reproducible at a fixed seed).
+  - id: knn
+    inputs: [embedding_tsv]
+    outputs:
+      - {id: neighbors_h5, path: "{name}_neighbors.h5"}
+    resources: {cores: 1, mem_mb: 16000}
+    modules:
+      - id: nn-baseline
+        name: "Baseline: kNN (exact, sklearn brute force, 1 BLAS thread)"
+        software_environment: scanpy
+        repository: *stage
+        parameters:
+          - {module: *m_fork, script: knn.py, n_neighbors: 15, flavor: umap, transformer: sklearn, blas_threads: 1, random_seed: 0}
+      - id: nn-scanpy
+        name: "scanpy defaults: kNN (pynndescent, 1 thread)"
+        software_environment: scanpy
+        repository: *stage
+        parameters:
+          - {module: *m_fork, script: knn.py, n_neighbors: 15, flavor: umap, transformer: pynndescent, n_jobs: 1, random_seed: [0, 1, 2, 3, 4]}
+      - id: nn-scanpy-mt
+        name: "kNN, pynndescent on 8 threads"
+        software_environment: scanpy
+        resources: {cores: 8, mem_mb: 16000}
+        repository: *stage
+        parameters:
+          - {module: *m_fork, script: knn.py, n_neighbors: 15, flavor: umap, transformer: pynndescent, n_jobs: 8, random_seed: [0, 1, 2, 3, 4]}
+      - id: nn-rapids
+        name: "rapids-singlecell kNN (cuVS brute force, GPU)"
+        software_environment: rapids
+        requires_capabilities: [gpu]
+        resources: {cores: 2, mem_mb: 16000}
+        repository: *stage
+        parameters:
+          - {module: *m_rapids, script: knn.py, n_neighbors: 15, flavor: rapids, random_seed: 0}
+
+  # Every Leiden at 5 resolutions (accuracy depends on the resolution; the analysis reads each
+  # pipeline at its oracle resolution) and 5 seeds (stability).
+  - id: cluster
+    inputs: [neighbors_h5]
+    outputs:
+      - {id: clusters_tsv, path: "{name}_clusters.tsv"}
+    resources: {cores: 1, mem_mb: 16000}
+    modules:
+      - id: cl-baseline
+        name: "Baseline: Leiden (leidenalg, until converged, undirected)"
+        software_environment: scanpy
+        repository: *stage
+        parameters:
+          - {module: *m_fork, script: cluster.py, flavor: leidenalg, n_iterations: -1, blas_threads: 1, resolution: [0.05, 0.2, 0.5, 1.0, 2.0], random_seed: [0, 1, 2, 3, 4]}
+      - id: cl-scanpy
+        name: "scanpy defaults: Leiden (igraph, 2 iterations)"
+        software_environment: scanpy
+        repository: *stage
+        parameters:
+          - {module: *m_fork, script: cluster.py, flavor: igraph, resolution: [0.05, 0.2, 0.5, 1.0, 2.0], random_seed: [0, 1, 2, 3, 4]}
+      - id: cl-rapids
+        name: "rapids-singlecell Leiden (cuGraph, GPU)"
+        software_environment: rapids
+        requires_capabilities: [gpu]
+        resources: {cores: 2, mem_mb: 16000}
+        repository: *stage
+        parameters:
+          - {module: *m_rapids, script: cluster_graph.py, method: rapids-leiden, resolution: [0.05, 0.2, 0.5, 1.0, 2.0], random_seed: [0, 1, 2, 3, 4]}

@@ -31,6 +31,7 @@ CONDA_PKGS_DIRS = "$PIXI_PROJECT_ROOT/.conda/pkgs"
 [tasks]
 validate = "ob validate plan benchmark.yaml"
 test = "python -m pytest -q tests"
+filters = "python scripts/make_filters.py"   # Phase 2 slice filters from benchmark-phase2.yaml
 dry = "ob run benchmark.yaml --dry"
 report = "python analysis/report.py --from_out out --output_dir results/report"
 # Re-generate envs/<env>.yml from pixi.lock (see "Module environments" below). Run after `pixi lock`.
