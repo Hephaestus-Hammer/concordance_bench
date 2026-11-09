@@ -29,6 +29,15 @@ def read_neighbors(path):
     return d, cells
 
 
+def read_connectivities(path):
+    """neighbors_h5: the connectivities (nested group) every Leiden module clusters on, cell_ids alongside."""
+    with h5py.File(path, "r") as h5:
+        cells = pd.Index(h5["cell_ids"][:].astype(str))
+        g, n = h5["connectivities"], len(cells)
+        c = sp.csr_matrix((g["data"][:], g["indices"][:], g["indptr"][:]), shape=(n, n))
+    return c, cells
+
+
 def read_clusters(path):
     """clusters_tsv: cell_id, cluster."""
     return pd.read_csv(path, sep="\t", index_col=0).iloc[:, 0].astype(str)
@@ -156,6 +165,24 @@ def ari(a, b):
     if top == expected:  # both partitions trivial (one cluster each, or all singletons)
         return 1.0
     return float((sum_ij - expected) / (top - expected))
+
+
+def modularity(graph, labels):
+    """Weighted Newman modularity (resolution 1) of a partition of an undirected graph.
+
+    The objective every Leiden module here maximises on the same connectivities, so
+    comparing it across implementations says whether one finds worse partitions or
+    only different, equally good ones. graph: symmetric CSR; labels: integer codes.
+    Q = sum over clusters of (weight inside / 2m) - (degree of cluster / 2m)^2.
+    """
+    c = graph.tocoo()
+    two_m = c.data.sum()
+    labels = np.asarray(labels)
+    k = labels.max() + 1
+    same = labels[c.row] == labels[c.col]
+    inside = np.bincount(labels[c.row[same]], weights=c.data[same], minlength=k)
+    degree = np.bincount(labels, weights=np.asarray(graph.sum(axis=1)).ravel(), minlength=k)
+    return float(inside.sum() / two_m - np.sum((degree / two_m) ** 2))
 
 
 def nmi(a, b):

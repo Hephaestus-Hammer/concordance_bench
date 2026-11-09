@@ -25,8 +25,10 @@ OUTPUTS = {
 }
 
 # Parameters that only choose a seed or a replicate. Two runs that differ only in
-# these have the same settings, so their disagreement is seed noise.
-SEED_PARAMS = {"random_seed", "seed", "replicate"}
+# these have the same settings, so their disagreement is seed noise. "run" is not an
+# ob parameter: index_runs() adds it to tell output folders (same-seed replicates) apart.
+SEED_PARAMS = {"random_seed", "seed", "replicate", "run"}
+REPLICATE_KEYS = {"replicate", "run"}
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,42 @@ def index(files):
     return df
 
 
+def index_runs(out_dirs):
+    """index() over one or several ob output trees.
+
+    Several trees are same-seed replicates of each other (the same plan run again into
+    another --out-dir): each run is tagged with its folder's name, as a "run" seed on
+    its input node and as "@<folder>" on its label. Two runs with the same parameters
+    from different folders then pair up as `replicate` (run-to-run noise at a fixed
+    seed), and every other pair is formed within one folder only. One tree: exactly
+    index(find(tree)).
+    """
+    out_dirs = [Path(d) for d in out_dirs]
+    if len(out_dirs) == 1:
+        return index(find(out_dirs[0]))
+    tags, rows = [], []
+    for d in out_dirs:
+        tag = d.resolve().name
+        while tag in tags:
+            tag += "+"
+        tags.append(tag)
+        for oid, paths in find(d).items():
+            for p in paths:
+                nodes = _tag(lineage(p), tag)
+                rows.append({"output": oid, "path": str(p), "size": nodes[0].module, "nodes": nodes, "run": tag})
+    df = pd.DataFrame(rows, columns=["output", "path", "size", "nodes", "run"])
+    df["label"] = [f"{lab} @{run}" for lab, run in zip(_labels(df["nodes"].tolist()), df["run"])]
+    return df
+
+
+def _tag(nodes, tag):
+    """The lineage with ("run", tag) added to its input node (the first after the data)."""
+    if len(nodes) < 2:
+        return nodes
+    n = nodes[1]
+    return (nodes[0], Node(n.stage, n.module, tuple(sorted(n.params + (("run", tag),)))), *nodes[2:])
+
+
 def _labels(all_nodes):
     """Short pipeline labels from PCA on, e.g. 'pc-scanpy > nn-rapids > cl-baseline'.
 
@@ -142,7 +180,7 @@ def pair_category(a, b):
         elif x.seeds != y.seeds:
             keys = {k for (k, v1), (_, v2) in zip(x.seeds, y.seeds) if v1 != v2}
             seed_keys |= keys
-            if keys - {"replicate"}:
+            if keys - REPLICATE_KEYS:
                 seeded.append(x.stage)
     if differ:
         return "+".join(differ)
@@ -164,20 +202,27 @@ def comparable(a, b, variants):
     """Whether two lineages make a like-for-like pair.
 
     Seed pairs: same settings everywhere, seed differs at exactly one stage
-    (one stage's noise floor). Settings pairs: wherever the settings are the same,
-    the seeds are the same too; where the settings differ, the seeds match as well
-    if both modules ran several seeds (a matched sample, not every cross-seed
+    (one stage's noise floor). Module pairs at one stage: everything else is the
+    same, seeds included, and at the stage being compared every seed of one module
+    pairs with every seed of the other: seed 3 of one Leiden implementation and seed 3
+    of another are unrelated draws, so each cross pair samples "A against B" as
+    validly as the matched one. The same module with other settings keeps matched
+    seeds (there a seed means the same thing), as do pairs differing at several stages
+    wherever both sides ran several (a matched sample, not every cross-seed
     combination). Anything else mixes a settings difference with seed noise.
     """
-    differ, seed_differ, unmatched = 0, 0, False
+    differ, seed_differ, unmatched, other_module = 0, 0, False, False
     for x, y in zip(a[1:], b[1:]):
         if x.module != y.module or x.settings != y.settings:
             differ += 1
+            other_module = x.module != y.module
             if x.seeds != y.seeds and min(len(variants[(x.stage, x.module, x.settings)]),
                                           len(variants[(y.stage, y.module, y.settings)])) > 1:
                 unmatched = True
         elif x.seeds != y.seeds:
             seed_differ += 1
+    if differ == 1 and other_module:
+        return seed_differ == 0
     if differ:
         return seed_differ == 0 and not unmatched
     return seed_differ == 1 or (seed_differ == 0 and a != b)
@@ -192,12 +237,21 @@ def pair_group(a, b):
 
     'knn' becomes 'knn: nn-baseline vs nn-rapids' (module ids in alphabetical order),
     so library against library at one stage can be read off directly; the same
-    module with different settings becomes 'knn: nn-scanpy settings'. Seed,
-    replicate and multi-stage groups ('pca+knn', ...) are unchanged.
+    module with different settings becomes 'knn: nn-scanpy settings'. A one-stage
+    seed group names the module whose seed varies, 'seed: cluster (cl-rapids)', so
+    each module has its own noise floor rather than one pooled over implementations;
+    a replicate group names the module that wrote the output, 'replicate (cl-rapids)'.
+    Multi-stage groups ('pca+knn', 'seed: pca+knn', ...) are unchanged.
     """
     cat = pair_category(a, b)
-    if "+" in cat or cat.startswith("seed") or cat in ("replicate", "identical"):
+    if cat == "replicate":
+        return f"replicate ({a[-1].module})"
+    if "+" in cat or cat == "identical":
         return cat
+    if cat.startswith("seed: "):
+        stage = cat[len("seed: "):]
+        x = next(x for x, y in zip(a[1:], b[1:]) if x.stage == stage and x.seeds != y.seeds)
+        return f"{cat} ({x.module})"
     x, y = next((x, y) for x, y in zip(a[1:], b[1:]) if x.stage == cat)
     if x.module == y.module:
         return f"{cat}: {x.module} settings"

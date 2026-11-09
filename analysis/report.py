@@ -34,7 +34,8 @@ import pandas as pd
 import concordance as cc
 import figures as fg
 import resources as rs
-from load import OUTPUTS, comparable, find, index, missing, pair_group, seed_variants
+import significance as sg
+from load import OUTPUTS, comparable, find, index, index_runs, missing, pair_group, seed_variants
 
 DESCRIPTIONS = {
     "runs": """What the report was built from: the number of output files per stage and
@@ -47,13 +48,20 @@ DESCRIPTIONS = {
         between them: the stages whose module or settings differ (<code>pca</code>,
         <code>knn</code>, <code>pca+knn</code>, …); where exactly one stage differs, the group also names
         the two modules (<code>knn: nn-baseline vs nn-rapids</code>), so one library can be compared with
-        another at one stage; <code>seed: &lt;stage&gt;</code> if only that
-        stage's random seed differs, which is that stage's noise floor; or <code>replicate</code>
-        if only the input replicate differs. Noise-floor groups are grey; colours are the same
+        another at one stage; <code>seed: &lt;stage&gt; (&lt;module&gt;)</code> if only that
+        stage's random seed differs, which is that module's own noise floor (each module
+        separately, so one implementation's differences are judged against its own seed noise,
+        not against a floor pooled over implementations); or <code>replicate (&lt;module&gt;)</code>
+        if nothing but the input replicate or the output folder differs: the same plan run
+        again with the same seeds (<code>--from_out out out-rep1 &hellip;</code>), so its spread is
+        run-to-run noise at a fixed seed, the floor below every seed floor. Every other pair is
+        formed within one folder. Noise-floor groups are grey; colours are the same
         in every figure. Only like-for-like pairs are compared: seed pairs differ in exactly one
-        stage's seed, and pairs that differ in a stage's settings have the same seeds everywhere
-        else (and at that stage too, when both modules ran several seeds), so a settings
-        difference is never mixed with seed noise.""",
+        stage's seed, and pairs that differ in one stage's module or settings have the same seeds everywhere
+        else, so a settings difference is never mixed with seed noise elsewhere. At the stage
+        being compared every seed of one module pairs with every seed of the other: seed numbers
+        mean nothing across implementations, so each cross pair is an equally valid draw of
+        &ldquo;A against B&rdquo;. Pairs differing at several stages keep matched seeds.""",
     "pca": """One line per group of pairs of PCA runs on the same cells: the median over the
         pairs, with their range shaded. The y-axis is 1&nbsp;&minus;&nbsp;|cos|
         between the cell scores of matching components, on a log scale (zero is drawn at
@@ -112,7 +120,10 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--output_dir", type=Path, default=Path("results/report"))
     p.add_argument("--name", default="concordance")
-    p.add_argument("--from_out", type=Path, help="find every output under this ob output tree")
+    p.add_argument("--from_out", type=Path, nargs="+",
+                   help="find every output under this ob output tree; several trees are same-seed "
+                        "replicates of one plan (e.g. out out-rep1 out-rep2) and pair up as `replicate`")
+    p.add_argument("--n_perm", type=int, default=9999, help="permutations per test")
     p.add_argument("--plan", type=Path, default=Path("benchmark.yaml"),
                    help="plan to read each stage's allocated cores from (optional)")
     for oid in OUTPUTS:
@@ -122,9 +133,9 @@ def parse_args():
 
 # ---- compute -------------------------------------------------------------------
 
-def compute(df):
+def compute(df, n_perm=9999):
     """All summary tables, one dataset size at a time to keep memory bounded."""
-    t = {k: [] for k in ("pca_curves", "pca_angles", "knn", "ari", "truth")}
+    t = {k: [] for k in ("pca_curves", "pca_angles", "knn", "ari", "truth", "quality", "tests")}
     n_cells = {}
     variants = seed_variants(df)
 
@@ -190,6 +201,29 @@ def compute(df):
             t["ari"].append({"size": size, "a": a["label"], "b": b["label"],
                              "category": pair_group(a["nodes"], b["nodes"]),
                              "ari": cc.ari(labels[i], labels[j])})
+        # Partition quality: modularity of each clustering on the connectivities it was
+        # clustered on (its parent kNN output), one graph in memory at a time.
+        parent = {r["nodes"]: r["path"] for _, r in by["neighbors_h5"].iterrows()}
+        children = {}
+        for i, (_, r) in enumerate(by["clusters_tsv"].iterrows()):
+            if r["nodes"][:-1] in parent:
+                children.setdefault(r["nodes"][:-1], []).append(i)
+        for up, idx in children.items():
+            graph, cells = cc.read_connectivities(parent[up])
+            graph = cc.align_graph(graph, cells, order)
+            for i in idx:
+                r = by["clusters_tsv"].iloc[i]
+                node = r["nodes"][-1]
+                t["quality"].append({"size": size, "module": node.module,
+                                     "upstream": " > ".join(n.module for n in up[2:]),
+                                     "run": r["label"], "modularity": cc.modularity(graph, labels[i]),
+                                     "clusters": n_clusters[i]})
+            del graph
+        # Each Leiden implementation against its own seed noise (significance.py).
+        tests = sg.stage_tests([(r["nodes"], labels[i]) for i, (_, r) in enumerate(by["clusters_tsv"].iterrows())],
+                               n_perm=n_perm)
+        if len(tests):
+            t["tests"].extend({"size": size, **row} for row in tests.to_dict("records"))
         if len(by["rawdata_clusters_truth"]):
             truth = cc.read_truth(by["rawdata_clusters_truth"]["path"].iloc[0]).reindex(order)
             truth_codes = {col: cc.codes(truth[col]) for col in truth.columns}
@@ -201,7 +235,7 @@ def compute(df):
                                        "clusters": nclu, "annotated types": truth[col].nunique()})
 
     tables = {k: pd.DataFrame(v) for k, v in t.items()}
-    for k in ("knn", "ari", "pca_angles"):
+    for k in ("knn", "ari", "pca_angles", "quality", "tests"):
         if len(tables[k]) == 0:
             tables[k] = pd.DataFrame(columns=["size", "category"])
     return tables, n_cells
@@ -317,6 +351,42 @@ def _per_size(sizes, n_cells, make_fig, make_table):
     return "".join(out)
 
 
+TESTS_DESC = """For each pair of Leiden implementations A and B, on every upstream (PCA and
+    kNN lineage) where both ran all their seeds: the ARI of A's seeds against each other
+    (<b>A's own noise floor</b>), of B's seeds against each other (<b>B's floor</b>), and of every
+    seed of A against every seed of B (<b>between</b>). <b>gap A</b> = mean within A &minus; mean
+    between: how much further switching to B moves A's result than re-seeding A does; <b>gap B</b>
+    the same from B's side. Each p-value is a permutation test: the A/B labels of the runs are
+    shuffled within each upstream 9,999 times, so pairs that share a run are never treated as
+    independent. <b>Both gaps positive and significant</b>: the two implementations find
+    different partitions. <b>Only one</b>: the other implementation is just noisier, not
+    different. A tiny p with a small gap is still a small effect; read the gap."""
+
+QUALITY_DESC = """Modularity (weighted, resolution 1) of every clustering on the kNN
+    connectivities it was clustered on: the objective all three Leiden implementations
+    maximise on that graph, so it says whether one finds <b>worse</b> partitions or only
+    <b>different</b>, equally good ones. Compare modules on the same upstream; one point per run,
+    one row per upstream. The table gives the median per module and upstream."""
+
+
+def _tests_table(t):
+    if not len(t):
+        return t
+    cols = ["A", "B", "upstreams", "runs A", "runs B", "within A median", "within B median",
+            "between median", "gap A", "p A", "gap B", "p B"]
+    return t[cols]
+
+
+def _quality_table(t):
+    if not len(t):
+        return t
+    return (t.groupby(["upstream", "module"])
+            .agg(runs=("modularity", "count"), **{"modularity median": ("modularity", "median"),
+                 "modularity min": ("modularity", "min"), "modularity max": ("modularity", "max"),
+                 "clusters median": ("clusters", "median")})
+            .reset_index())
+
+
 def render(df, tables, n_cells, source, rt=None, series=None, ph=None, allocated=None):
     sizes = sorted(n_cells, key=n_cells.get)
     counts = (df.assign(stage=df["output"]).pivot_table(index="size", columns="stage", values="path",
@@ -325,7 +395,7 @@ def render(df, tables, n_cells, source, rt=None, series=None, ph=None, allocated
     counts.insert(1, "cells", counts["size"].map(n_cells))
     miss = pd.concat([missing(df, oid) for oid in OUTPUTS], ignore_index=True)
     has_floor = (tables["ari"]["category"].str.startswith("seed")
-                 | (tables["ari"]["category"] == "replicate")).any()
+                 | tables["ari"]["category"].str.startswith("replicate")).any()
     floor_note = None if has_floor else (
         "No seed or replicate pairs in this run, so there is no noise floor yet: "
         "differences cannot be compared with seed noise.")
@@ -359,6 +429,16 @@ def render(df, tables, n_cells, source, rt=None, series=None, ph=None, allocated
                                      "ARI between runs (1 = identical; line = median)") if len(at(tables["ari"], s)) else None,
             lambda s: summarise(at(tables["ari"], s), ["ari"]))
         notes["ari"] = floor_note
+        if len(tables["tests"]):
+            body["ari"] += ("<h3>Each implementation against its own seed noise</h3>"
+                            + _block("desc", f"<p class='desc'>{TESTS_DESC}</p>")
+                            + _per_size(sizes, n_cells, lambda s: None, lambda s: _tests_table(at(tables["tests"], s))))
+        if len(tables["quality"]):
+            body["ari"] += ("<h3>Partition quality</h3>"
+                            + _block("desc", f"<p class='desc'>{QUALITY_DESC}</p>")
+                            + _per_size(sizes, n_cells,
+                                        lambda s: fg.quality(at(tables["quality"], s), s),
+                                        lambda s: _quality_table(at(tables["quality"], s))))
     if len(tables["truth"]):
         body["truth"] = _per_size(
             sizes, n_cells,
@@ -401,7 +481,7 @@ def render(df, tables, n_cells, source, rt=None, series=None, ph=None, allocated
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Concordance report</title>
 <style>
-  :root {{ --ink:#0b0b0b; --ink2:#52514e; --line:#e4e3df; --bg:#fcfcfb; --note:#fff4e5; --acc:#2a78d6; }}
+  :root {{ --ink:#0b0b0b; --ink2:#52514e; --line:#e4e3df; --bg:#fcfcfb; --note:#fff4e5; --acc:#425fed; }}
   body {{ background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,sans-serif;
          max-width:1100px; margin:0 auto; padding:24px 16px 64px; }}
   h1 {{ font-size:1.6rem; margin:0 0 4px; }} h2 {{ font-size:1.2rem; margin:24px 0 6px; }}
@@ -470,17 +550,20 @@ def render(df, tables, n_cells, source, rt=None, series=None, ph=None, allocated
 
 def main():
     args = parse_args()
-    files = find(args.from_out) if args.from_out else {oid: getattr(args, oid) for oid in OUTPUTS}
-    if not any(files.values()):
+    if args.from_out:
+        df = index_runs(args.from_out)
+    else:
+        files = {oid: getattr(args, oid) for oid in OUTPUTS}
+        df = index(files) if any(files.values()) else None
+    if df is None or not len(df):
         raise SystemExit("no outputs found: give --from_out or the per-output flags")
-    df = index(files)
-    tables, n_cells = compute(df)
+    tables, n_cells = compute(df, n_perm=args.n_perm)
     rt, series, ph = rs.runtimes(df)
     allocated = rs.allocated_cores(args.plan)
     rt = rs.add_cores(rt, allocated)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    source = str(args.from_out) if args.from_out else "gathered files"
+    source = " + ".join(map(str, args.from_out)) if args.from_out else "gathered files"
     out = args.output_dir / f"{args.name}_report.html"
     out.write_text(render(df, tables, n_cells, source, rt, series, ph, allocated))
     if len(rt):
