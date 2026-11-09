@@ -32,12 +32,13 @@ import pandas as pd
 import concordance as cc
 
 
-def _ari_matrix(codes):
-    n = len(codes)
+
+def _matrix(items, sim):
+    n = len(items)
     m = np.zeros((n, n))
     for i in range(n):
         for j in range(i + 1, n):
-            m[i, j] = m[j, i] = cc.ari(codes[i], codes[j])
+            m[i, j] = m[j, i] = sim(items[i], items[j])
     return m
 
 
@@ -52,15 +53,17 @@ def _means(m, a):
     return wa, wb, bt
 
 
-def own_floor_test(strata, n_perm=9999, seed=0):
-    """strata: list of (codes_A, codes_B), one per shared upstream; each a list of
-    integer label arrays (cc.codes), one per seed. Returns a dict of results."""
+def own_floor_test(strata, n_perm=9999, seed=0, sim=None):
+    """strata: list of (runs_A, runs_B), one per shared upstream, each a list with one item
+    per seed. sim(x, y): the similarity of two runs, ARI of integer label arrays (cc.codes) by
+    default; any symmetric similarity works (PCA agreement, shared neighbours). Returns a dict."""
+    sim = sim or cc.ari
     rng = np.random.default_rng(seed)
     obs_a, obs_b, null_a, null_b = [], [], [], []
     within_a, within_b, between = [], [], []
     for codes_a, codes_b in strata:
         na, nb = len(codes_a), len(codes_b)
-        m = _ari_matrix(list(codes_a) + list(codes_b))
+        m = _matrix(list(codes_a) + list(codes_b), sim)
         member = np.r_[np.ones(na, bool), np.zeros(nb, bool)]
         wa, wb, bt = _means(m, member[None, :])
         obs_a.append(wa[0] - bt[0])
@@ -91,8 +94,10 @@ def stage_tests(runs, n_perm=9999):
 
     runs: list of (nodes, codes) for one dataset size, nodes as from load.lineage. A
     module takes part on an upstream only if it ran there with at least two seeds and
-    the same settings; a module run with several settings counts as one implementation
-    per setting. Returns one row per pair of implementations.
+    the same settings. A module run with several settings (a resolution sweep) counts as one
+    implementation per setting, and two modules are only compared where the settings they
+    share agree (the same resolution): comparing Leiden at 0.5 against Leiden at 2 would
+    measure the resolution, not the implementation. Returns one row per pair compared.
     """
     # Stratum = the upstream lineage. An implementation = module plus its own settings:
     # modules have different parameter sets (blas_threads on one, flavor on another), so
@@ -105,15 +110,38 @@ def stage_tests(runs, n_perm=9999):
     variants = {}
     for m, st in impls:
         variants.setdefault(m, set()).add(st)
-    name = {(m, st): m if len(variants[m]) == 1 else f"{m} {dict(st)}" for m, st in impls}
+
+    def name(impl):
+        """Module id, plus the settings that tell its variants apart (e.g. the resolution)."""
+        m, st = impl
+        if len(variants[m]) == 1:
+            return m
+        differ = {k for k in {k for v in variants[m] for k, _ in v}
+                  if len({dict(v).get(k) for v in variants[m]}) > 1}
+        return f"{m} " + ", ".join(f"{k}={v}" for k, v in st if k in differ)
+
+    # Settings swept within a module (a resolution list): implementations are only compared at
+    # equal values of these. Settings fixed per module (flavor, blas_threads, the module URL)
+    # are what makes an implementation and differ between modules by design.
+    swept = {k for vs in variants.values()
+             for k in {k for v in vs for k, _ in v} if len({dict(v).get(k) for v in vs}) > 1}
+
+    def aligned(a, b):
+        if a[0] == b[0]:
+            return False
+        sa, sb = dict(a[1]), dict(b[1])
+        return all(sa.get(k) == sb.get(k) for k in swept if k in sa and k in sb)
+
     rows = []
     for i, ma in enumerate(impls):
         for mb in impls[i + 1:]:
+            if not aligned(ma, mb):
+                continue
             strata = [(g[ma], g[mb]) for g in groups.values()
                       if len(g.get(ma, [])) > 1 and len(g.get(mb, [])) > 1]
             if not strata:
                 continue
             r = own_floor_test(strata, n_perm=n_perm)
-            rows.append({"A": name[ma], "B": name[mb], "runs A": sum(len(s[0]) for s in strata),
+            rows.append({"A": name(ma), "B": name(mb), "runs A": sum(len(s[0]) for s in strata),
                          "runs B": sum(len(s[1]) for s in strata), **r})
     return pd.DataFrame(rows)

@@ -20,6 +20,11 @@ def read_embedding(path):
     return pd.read_csv(path, sep="\t", index_col=0)
 
 
+def read_loadings(path):
+    """loadings_tsv: header gene_id + one column per component; genes as rows."""
+    return pd.read_csv(path, sep="\t", index_col=0)
+
+
 def read_neighbors(path):
     """neighbors_h5: kNN distances as CSR at the file root, cell_ids alongside."""
     with h5py.File(path, "r") as h5:
@@ -90,6 +95,28 @@ def pca_max_angle(a, b, k=None, qa=None, qb=None):
 
 
 # ---- kNN -----------------------------------------------------------------------
+
+def pca_fidelity(v_exact, variance, v_other):
+    """Share of the exact top-k variance that another solver's subspace holds.
+
+    sum_i lambda_i * ||Q^T v_i||^2 / sum_i lambda_i, with v_i the exact component i
+    (genes x k columns), lambda_i its variance, and Q an orthonormal basis of the other
+    solver's loadings (orthonormalised: not every solver returns exactly orthonormal
+    loadings). In [0, 1]. A missed component costs its share of the variance; rotations
+    inside the subspace (near-equal eigenvalues) and sign flips cost nothing.
+    """
+    v = np.asarray(v_exact, dtype=np.float64)
+    v = v / np.linalg.norm(v, axis=0, keepdims=True)
+    q, _ = np.linalg.qr(np.asarray(v_other, dtype=np.float64))
+    captured = ((q.T @ v) ** 2).sum(axis=0)
+    w = np.asarray(variance, dtype=np.float64)
+    return float((w * captured).sum() / w.sum())
+
+
+def pca_agreement(v_a, var_a, v_b, var_b):
+    """pca_fidelity between two runs of one solver (seeds), averaged over both directions."""
+    return 0.5 * (pca_fidelity(v_a, var_a, v_b) + pca_fidelity(v_b, var_b, v_a))
+
 
 def neighbours_per_cell(d):
     """Stored neighbours per cell, not counting the cell itself (median over cells)."""

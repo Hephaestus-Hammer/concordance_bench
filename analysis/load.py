@@ -19,6 +19,7 @@ import pandas as pd
 # output id (as in benchmark.yaml) -> filename suffix
 OUTPUTS = {
     "embedding_tsv": "_embedding.tsv",
+    "loadings_tsv": "_loadings.tsv",
     "neighbors_h5": "_neighbors.h5",
     "clusters_tsv": "_clusters.tsv",
     "rawdata_clusters_truth": ".clusters_truth.tsv",
