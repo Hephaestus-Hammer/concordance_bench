@@ -17,14 +17,20 @@ docs/phase2-plan.md's; in short:
   accuracy          ARI of the final clusters against the reference labels, also as a share of
                     the range between chance (0) and the oracle bound (the better of logistic
                     regression and 15-NN, cross-validated on the exact embedding)
-  oracle resolution the resolution with the best median accuracy over seeds (never per seed).
-                    Stage tabs read downstream accuracy at the *baseline pipeline's* oracle
+  resolution        every summary is given at every resolution of the sweep (res_key "0.5",
+                    ...) and at the oracle resolution (res_key "oracle"): the resolution with
+                    the best median accuracy over seeds (never per seed). At "oracle", stage
+                    tabs read downstream results at the *baseline pipeline's* oracle
                     resolution, so a worse PCA or kNN cannot be rescued by another resolution;
                     the Clustering tab and the named pipelines use their own.
   cost              wall time: of a stage's own job in the stage tabs; per answer for the named
-                    pipelines (PCA and kNN once, Leiden at every resolution of the sweep). The
-                    first rapids job of a module in a folder is a cold start: flagged, and left
-                    out of medians where there are others.
+                    pipelines: at a fixed resolution PCA + kNN + one Leiden run, at "oracle" PCA
+                    + kNN + Leiden at every resolution of the sweep (choosing the best needs them
+                    all). The first rapids job of a module in a folder is a cold start: flagged,
+                    and left out of medians where there are others.
+  concordance       between two implementations: the median agreement between their runs
+                    against each one's own seed floor (median agreement between its own runs);
+                    gap = floor - between. No significance tests.
   named pipelines   baseline, scanpy-defaults, tuned-cpu, all-gpu, hybrid (PIPELINES), with
                     matched seeds: seed i at every seeded stage
 
@@ -36,25 +42,24 @@ Outputs (phase2_<name>.tsv):
   jobs                      every job: wall time, memory, cores, GPU, start (resources.runtimes)
   pca, knn                  every PCA / kNN run of its slice: fidelity, wall time, cold start
   pca_pairs, knn_pairs      seed pairs (stability) and replicate pairs (reproducibility)
-  stage_concordance         PCA and kNN: every pair of modules, per dataset and size, on the
-                            stage's own measure, against each one's own seed floor (the
-                            permutation test where both have several seeds)
+  stage_concordance         every pair of modules of a stage, per dataset and size, on the
+                            stage's own measure (Leiden: ARI, per resolution), against each
+                            one's own seed floor
   stability, reproducibility  final clusters: per pipeline and resolution (pairs, quartiles)
-  stages                    stage x module x dataset x size: fidelity, stage stability and
-                            reproducibility, downstream accuracy and stability, cost: the
-                            stage tabs' summary
-  answers                   every answer: wall time per stage and in total, cold start
-  pipelines                 named pipeline x dataset x size at its oracle resolution: accuracy,
-                            stability, reproducibility, cost, log10 cost against the fastest
-  pipelines_runs            the named pipelines' runs at their oracle resolution (accuracy
-                            distributions)
-  concordance_*             report.py's concordance tables per dataset/size: PCA angles, kNN
-                            overlap, ARI between runs, the Leiden tests against each module's
-                            own seed noise, modularity (unless --no_concordance)
+  stages                    stage x module x dataset x size x res_key: fidelity, stage
+                            stability and reproducibility, downstream accuracy and stability,
+                            cost: the stage tabs' summary
+  answers                   every answer: wall time per stage and in total, cold start; per
+                            resolution (scope "single") and for the whole sweep (scope "sweep")
+  pipelines                 named pipeline x dataset x size x res_key: accuracy, stability,
+                            reproducibility, cost, log10 cost against the fastest
+  pipelines_runs            the named pipelines' runs per res_key (accuracy distributions)
 """
 
 import argparse
 import itertools
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -63,14 +68,13 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
 import concordance as cc  # noqa: E402
-import report  # noqa: E402
 import resources as rs  # noqa: E402
-import significance as sg  # noqa: E402
 from load import REPLICATE_KEYS, index_runs  # noqa: E402
 
 STAGES = ("pca", "knn", "cluster")
 BASELINE = {"pca": "pc-baseline", "knn": "nn-baseline", "cluster": "cl-baseline"}
 BASELINE_PIPELINE = " > ".join(BASELINE.values())
+ORACLE = "oracle"  # res_key of the oracle-resolution rows; the others are f"{resolution:g}"
 PIPELINES = {  # keep in step with scripts/make_filters.py
     "baseline":        ("pc-baseline", "nn-baseline", "cl-baseline"),
     "scanpy-defaults": ("pc-scanpy", "nn-scanpy", "cl-scanpy"),
@@ -323,47 +327,39 @@ def knn_stage(df):
     return t.drop(columns=["nodes"]), pd.DataFrame(pairs, columns=["dataset", "subsample", "module", "kind", "value"])
 
 
-def stage_concordance(stage, t, items, sim, n_perm=9999):
-    """Every pair of modules of one stage, per dataset and size: their agreement against each
-    one's own seed floor, on the stage's own measure. The permutation test (significance.py)
-    where both modules ran several seeds; the medians alone otherwise (an exact module has no
-    seed noise: its floor is undefined, not 1)."""
+def res_key(r):
+    return ORACLE if isinstance(r, str) else f"{float(r):g}"
+
+
+def stage_concordance(stage, t, items, sim, by=("dataset", "subsample")):
+    """Every pair of modules of one stage, per group (dataset and size; Leiden also resolution):
+    the median agreement between their runs against each one's own seed floor, the median
+    agreement between its own runs (undefined, not 1, for a module that ran once). Runs are
+    compared within one output folder and upstream only."""
     rows = []
-    for (d, s), g in t.groupby(["dataset", "subsample"]):
-        by = {m: gm for m, gm in g.groupby("module")}
-        for a, b in itertools.combinations(sorted(by), 2):
+    for k, g in t.groupby(list(by)):
+        mods = {m: gm for m, gm in g.groupby("module")}
+        for a, b in itertools.combinations(sorted(mods), 2):
             strata = []
-            for run in sorted(set(by[a]["run"]) & set(by[b]["run"])):
-                ra = [items(r) for _, r in by[a][by[a]["run"] == run].iterrows()]
-                rb = [items(r) for _, r in by[b][by[b]["run"] == run].iterrows()]
+            for key in sorted(set(zip(mods[a]["run"], mods[a]["upstream"])) & set(zip(mods[b]["run"], mods[b]["upstream"]))):
+                ra = [items(r) for _, r in mods[a][(mods[a]["run"] == key[0]) & (mods[a]["upstream"] == key[1])].iterrows()]
+                rb = [items(r) for _, r in mods[b][(mods[b]["run"] == key[0]) & (mods[b]["upstream"] == key[1])].iterrows()]
                 strata.append((ra, rb))
             if not strata:
                 continue
-            row = {"stage": stage, "dataset": d, "subsample": s, "A": a, "B": b,
-                   "runs A": sum(len(x[0]) for x in strata), "runs B": sum(len(x[1]) for x in strata)}
-            testable = [x for x in strata if len(x[0]) > 1 and len(x[1]) > 1]
-            if testable:
-                row.update(sg.own_floor_test(testable, n_perm=n_perm, sim=sim))
-            else:
-                # one side ran once (an exact module): no permutation test, but the seeded
-                # side's own floor and its gap (floor - between, means) are still defined
-                between = [sim(x, y) for ra, rb in strata for x in ra for y in rb]
-                within = {}
-                for side, idx in (("A", 0), ("B", 1)):
-                    w = [sim(x, y) for st in strata for x, y in itertools.combinations(st[idx], 2)]
-                    within[side] = w
-                row.update({"upstreams": len(strata), "between median": float(np.median(between)),
-                            "within A median": float(np.median(within["A"])) if within["A"] else np.nan,
-                            "within B median": float(np.median(within["B"])) if within["B"] else np.nan,
-                            "gap A": float(np.mean(within["A"]) - np.mean(between)) if within["A"] else np.nan,
-                            "p A": np.nan,
-                            "gap B": float(np.mean(within["B"]) - np.mean(between)) if within["B"] else np.nan,
-                            "p B": np.nan})
-            rows.append(row)
+            between = [sim(x, y) for ra, rb in strata for x in ra for y in rb]
+            within = {side: [sim(x, y) for st in strata for x, y in itertools.combinations(st[i], 2)]
+                      for side, i in (("A", 0), ("B", 1))}
+            med = {side: float(np.median(w)) if w else np.nan for side, w in within.items()}
+            bmed = float(np.median(between))
+            rows.append({"stage": stage, **dict(zip(by, k)), "A": a, "B": b,
+                         "runs A": sum(len(x[0]) for x in strata), "runs B": sum(len(x[1]) for x in strata),
+                         "within A median": med["A"], "within B median": med["B"], "between median": bmed,
+                         "gap A": med["A"] - bmed, "gap B": med["B"] - bmed})
     return pd.DataFrame(rows)
 
 
-def pca_concordance(pca, n_perm=9999):
+def pca_concordance(pca):
     cache = {}
 
     def items(r):
@@ -375,10 +371,10 @@ def pca_concordance(pca, n_perm=9999):
     def sim(x, y):
         return cc.pca_agreement(x[0].to_numpy(), x[1], y[0].reindex(x[0].index).to_numpy(), y[1])
 
-    return stage_concordance("pca", pca, items, sim, n_perm) if len(pca) else pd.DataFrame()
+    return stage_concordance("pca", pca, items, sim) if len(pca) else pd.DataFrame()
 
 
-def knn_concordance(knn, n_perm=9999):
+def knn_concordance(knn):
     cache, order = {}, {}
 
     def items(r):
@@ -392,7 +388,43 @@ def knn_concordance(knn, n_perm=9999):
     def sim(x, y):
         return float(cc.knn_shared_fraction(x, y).mean())
 
-    return stage_concordance("knn", knn, items, sim, n_perm) if len(knn) else pd.DataFrame()
+    return stage_concordance("knn", knn, items, sim) if len(knn) else pd.DataFrame()
+
+
+def cluster_slice(runs):
+    """The Clustering slice: exact PCA and kNN (the baselines) at seed 0, every Leiden."""
+    sl = runs[runs["varies"].isin(["none", "cluster"])]
+    return sl[sl["pca_seed"].isin(["0", ""]) & sl["knn_seed"].isin(["0", ""])]
+
+
+def cluster_concordance(runs):
+    """Leiden implementations on the Clustering slice: ARI between them at equal resolutions,
+    against each one's seed floor; per resolution, and at res_key "oracle" the rows at the
+    baseline Leiden's oracle resolution."""
+    sl = cluster_slice(runs)
+    if not len(sl):
+        return pd.DataFrame()
+    t = sl.assign(module=sl["cluster"], upstream=sl["pca"] + " > " + sl["knn"], dir=sl["cluster_dir"])
+    cache = {}
+
+    def items(r):
+        if r["path"] not in cache:
+            cache[r["path"]] = cc.read_clusters(r["path"])
+        return cache[r["path"]]
+
+    def sim(x, y):
+        return cc.ari(cc.codes(x), cc.codes(y.reindex(x.index)))
+
+    c = stage_concordance("cluster", t, items, sim, by=("dataset", "subsample", "resolution"))
+    if not len(c):
+        return c
+    c["res_key"] = c["resolution"].map(res_key)
+    orc = []
+    for (d, s), g in t.groupby(["dataset", "subsample"]):
+        base = g[g["cluster"] == BASELINE["cluster"]]
+        r = oracle_resolution(base) if len(base) else np.nan
+        orc.append(c[(c["dataset"] == d) & (c["subsample"] == s) & (c["resolution"] == r)].assign(res_key=ORACLE))
+    return pd.concat([c, *orc], ignore_index=True)
 
 
 # ---- cost ------------------------------------------------------------------------------
@@ -429,19 +461,26 @@ def warm_median(x):
 
 
 def answers(runs, rt, cold):
-    """One row per answer: wall time of its PCA, kNN and every Leiden resolution, in total."""
+    """One row per answer and resolution (scope "single": PCA + kNN + one Leiden run) and per
+    answer for the whole sweep (scope "sweep": PCA + kNN + Leiden at every resolution)."""
     wall = dict(zip(rt["dir"], rt["s"])) if len(rt) else {}
     rss = dict(zip(rt["dir"], rt["max_rss"])) if len(rt) else {}
     key = ["dataset", "subsample", "pipeline", "pca_seed", "knn_seed", "cluster_seed", "run"]
     out = []
-    for k, g in runs.groupby(key, dropna=False):
-        dirs = [g["pca_dir"].iloc[0], g["knn_dir"].iloc[0], *g["cluster_dir"]]
+
+    def row(k, scope, res, cdirs, g):
+        dirs = [g["pca_dir"].iloc[0], g["knn_dir"].iloc[0], *cdirs]
         w = [wall.get(d, np.nan) for d in dirs]
-        out.append({**dict(zip(key, k)), "resolutions": g["resolution"].nunique(),
-                    "pca_s": w[0], "knn_s": w[1], "cluster_s": float(np.sum(w[2:])),
-                    "wall_s": float(np.sum(w)) if np.isfinite(w).all() else np.nan,
-                    "peak_rss_mb": np.nanmax([rss.get(d, np.nan) for d in dirs]) if rss else np.nan,
-                    "cold_start": any(d in cold for d in dirs)})
+        return {**dict(zip(key, k)), "scope": scope, "resolution": res, "resolutions": len(cdirs),
+                "pca_s": w[0], "knn_s": w[1], "cluster_s": float(np.sum(w[2:])),
+                "wall_s": float(np.sum(w)) if np.isfinite(w).all() else np.nan,
+                "peak_rss_mb": np.nanmax([rss.get(d, np.nan) for d in dirs]) if rss else np.nan,
+                "cold_start": any(d in cold for d in dirs)}
+
+    for k, g in runs.groupby(key, dropna=False):
+        out.append(row(k, "sweep", np.nan, list(g["cluster_dir"]), g))
+        for res, gr in g.groupby("resolution"):
+            out.append(row(k, "single", res, list(gr["cluster_dir"]), g))
     return pd.DataFrame(out)
 
 
@@ -461,7 +500,7 @@ def _share(ari, oracle):
 
 
 def stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold):
-    """Stage x module x dataset x size: the stage tabs' numbers."""
+    """Stage x module x dataset x size x res_key: the stage tabs' numbers."""
     b = bounds.set_index(["dataset", "subsample"]) if len(bounds) else pd.DataFrame()
     # A stage tab lets only that stage's seed vary: the other stages at the baseline modules
     # and at seed 0, so downstream accuracy and stability measure that stage alone, for the
@@ -474,6 +513,7 @@ def stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold):
         for c in other_seeds[stage]:
             sl = sl[sl[c].isin(["0", ""])]
         sliced[stage] = (sl, stability(sl), reproducibility(sl))
+    grid = sorted(runs["resolution"].dropna().unique())
     rows = []
     for (d, s), g in runs.groupby(["dataset", "subsample"]):
         oracle = b.at[(d, s), "oracle"] if (d, s) in b.index else np.nan
@@ -482,32 +522,36 @@ def stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold):
         for stage in STAGES:
             sl_all, stab, repro = sliced[stage]
             sl = sl_all[(sl_all["dataset"] == d) & (sl_all["subsample"] == s)]
-            col = stage
-            for module, gm in sl.groupby(col):
+            for module, gm in sl.groupby(stage):
                 pipeline = gm["pipeline"].iloc[0]
-                res = res_base if stage != "cluster" else oracle_resolution(gm)
-                at = gm[gm["resolution"] == res]["ari_truth"]
-                row = {"stage": stage, "module": module, "dataset": d, "subsample": s,
-                       "cells": b.at[(d, s), "cells"] if (d, s) in b.index else np.nan,
-                       "resolution": res, "resolution_rule": "baseline oracle" if stage != "cluster" else "own oracle",
-                       "accuracy_ari": float(at.median()) if len(at) else np.nan,
-                       "accuracy_share": _share(float(at.median()), oracle) if len(at) else np.nan,
-                       "downstream_stability": _pick(stab, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
-                       "downstream_reproducibility": _pick(repro, dataset=d, subsample=s, pipeline=pipeline, resolution=res)}
+                own = {"fidelity": np.nan, "stage_stability": np.nan, "stage_reproducibility": np.nan, "cost_s": np.nan}
                 if stage in ("pca", "knn"):
                     st, pairs = (pca, pca_pairs) if stage == "pca" else (knn, knn_pairs)
                     r = st[(st["dataset"] == d) & (st["subsample"] == s) & (st["module"] == module)] if len(st) else st
                     p = pairs[(pairs["dataset"] == d) & (pairs["subsample"] == s) & (pairs["module"] == module)] if len(pairs) else pairs
-                    row.update({"fidelity": float(r["fidelity"].median()) if len(r) else np.nan,
-                                "stage_stability": float(p[p["kind"] == "stability"]["value"].median()) if len(p) else np.nan,
-                                "stage_reproducibility": float(p[p["kind"] == "reproducibility"]["value"].median()) if len(p) else np.nan,
-                                "cost_s": warm_median(r) if len(r) else np.nan})
-                else:
-                    jobs = add_cost(gm.rename(columns={"cluster_dir": "dir"})[["dir"]], rt, cold)
-                    row.update({"fidelity": np.nan, "stage_stability": row["downstream_stability"],
-                                "stage_reproducibility": row["downstream_reproducibility"],
-                                "cost_s": warm_median(jobs)})  # one Leiden run
-                rows.append(row)
+                    own = {"fidelity": float(r["fidelity"].median()) if len(r) else np.nan,
+                           "stage_stability": float(p[p["kind"] == "stability"]["value"].median()) if len(p) else np.nan,
+                           "stage_reproducibility": float(p[p["kind"] == "reproducibility"]["value"].median()) if len(p) else np.nan,
+                           "cost_s": warm_median(r) if len(r) else np.nan}
+                choices = [(ORACLE, res_base if stage != "cluster" else oracle_resolution(gm),
+                            "baseline oracle" if stage != "cluster" else "own oracle")]
+                choices += [(res_key(x), x, "fixed") for x in grid]
+                for key, res, rule in choices:
+                    at = gm[gm["resolution"] == res]
+                    row = {"stage": stage, "module": module, "dataset": d, "subsample": s,
+                           "cells": b.at[(d, s), "cells"] if (d, s) in b.index else np.nan,
+                           "res_key": key, "resolution": res, "resolution_rule": rule,
+                           "accuracy_ari": float(at["ari_truth"].median()) if len(at) else np.nan,
+                           "accuracy_share": _share(float(at["ari_truth"].median()), oracle) if len(at) else np.nan,
+                           "downstream_stability": _pick(stab, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
+                           "downstream_reproducibility": _pick(repro, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
+                           **own}
+                    if stage == "cluster":
+                        jobs = add_cost(at.rename(columns={"cluster_dir": "dir"})[["dir"]], rt, cold)
+                        row.update({"stage_stability": row["downstream_stability"],
+                                    "stage_reproducibility": row["downstream_reproducibility"],
+                                    "cost_s": warm_median(jobs) if len(jobs) else np.nan})  # one Leiden run
+                    rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -528,32 +572,40 @@ def named_pipeline_runs(runs):
 
 
 def pipelines_summary(named, bounds, stab, repro, ans):
-    """Named pipeline x dataset x size, at its own oracle resolution."""
+    """Named pipeline x dataset x size x res_key. At a fixed resolution the cost of an answer is
+    PCA + kNN + one Leiden run; at "oracle" the whole sweep, since choosing needs every run."""
     b = bounds.set_index(["dataset", "subsample"]) if len(bounds) else pd.DataFrame()
-    rows, at_oracle = [], []
+    grid = sorted(named["resolution"].dropna().unique()) if len(named) else []
+    rows, at_res = [], []
     for (d, s, name), g in named.groupby(["dataset", "subsample", "named"]):
-        res = oracle_resolution(g)
-        at = g[g["resolution"] == res]
         oracle = b.at[(d, s), "oracle"] if (d, s) in b.index else np.nan
         pipeline = g["pipeline"].iloc[0]
         keys = set(zip(g["pca_seed"], g["knn_seed"], g["cluster_seed"], g["run"]))
         a = ans[(ans["dataset"] == d) & (ans["subsample"] == s) & (ans["pipeline"] == pipeline)]
         a = a[[k in keys for k in zip(a["pca_seed"], a["knn_seed"], a["cluster_seed"], a["run"])]]
-        rows.append({"dataset": d, "subsample": s,
-                     "cells": b.at[(d, s), "cells"] if (d, s) in b.index else np.nan,
-                     "pipeline": name, "modules": pipeline, "oracle_resolution": res, "runs": len(at),
-                     "accuracy_ari": float(at["ari_truth"].median()),
-                     "accuracy_q10": float(at["ari_truth"].quantile(0.1)), "accuracy_q90": float(at["ari_truth"].quantile(0.9)),
-                     "accuracy_share": _share(float(at["ari_truth"].median()), oracle),
-                     "stability": _pick(stab, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
-                     "reproducibility": _pick(repro, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
-                     "cost_s": warm_median(a) if len(a) else np.nan,
-                     "cost_cold_answers": int(a["cold_start"].sum()) if len(a) else 0})
-        at_oracle.append(at.assign(accuracy_share=[_share(x, oracle) for x in at["ari_truth"]]))
+        choices = [(ORACLE, oracle_resolution(g))] + [(res_key(x), x) for x in grid]
+        for key, res in choices:
+            at = g[g["resolution"] == res]
+            if not len(at):
+                continue
+            c = a[a["scope"] == "sweep"] if key == ORACLE else a[(a["scope"] == "single") & (a["resolution"] == res)]
+            rows.append({"dataset": d, "subsample": s,
+                         "cells": b.at[(d, s), "cells"] if (d, s) in b.index else np.nan,
+                         "pipeline": name, "modules": pipeline, "res_key": key, "resolution": res,
+                         "runs": len(at), "accuracy_ari": float(at["ari_truth"].median()),
+                         "accuracy_q10": float(at["ari_truth"].quantile(0.1)),
+                         "accuracy_q90": float(at["ari_truth"].quantile(0.9)),
+                         "accuracy_share": _share(float(at["ari_truth"].median()), oracle),
+                         "stability": _pick(stab, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
+                         "reproducibility": _pick(repro, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
+                         "cost_s": warm_median(c) if len(c) else np.nan,
+                         "cost_cold_answers": int(c["cold_start"].sum()) if len(c) else 0})
+            at_res.append(at.assign(res_key=key, accuracy_share=[_share(x, oracle) for x in at["ari_truth"]]))
     p = pd.DataFrame(rows)
     if len(p):
-        p["log10_cost_vs_fastest"] = np.log10(p["cost_s"] / p.groupby(["dataset", "subsample"])["cost_s"].transform("min"))
-    pr = pd.concat(at_oracle) if at_oracle else pd.DataFrame()
+        p["log10_cost_vs_fastest"] = np.log10(
+            p["cost_s"] / p.groupby(["dataset", "subsample", "res_key"])["cost_s"].transform("min"))
+    pr = pd.concat(at_res) if at_res else pd.DataFrame()
     return p, pr
 
 
@@ -561,13 +613,11 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--from_out", type=Path, nargs="+", required=True)
     p.add_argument("--output_dir", type=Path, default=Path("results/phase2"))
-    p.add_argument("--n_perm", type=int, default=9999, help="permutations per concordance test")
-    p.add_argument("--no_concordance", action="store_true",
-                   help="skip the concordance tables (report.compute per dataset and size), the slow part")
+    p.add_argument("--no_report", action="store_true",
+                   help="write the TSVs only; skip rendering report/phase2.qmd to HTML")
     args = p.parse_args()
 
     df = index_runs(args.from_out)
-    df["size"] = [f"{n[0].module}/{n[1].module}" if len(n) > 1 else n[0].module for n in df["nodes"]]
     runs = clustering_table(df)
     if not len(runs):
         raise SystemExit("no Phase 2 clusterings found (data > input > pca > knn > cluster)")
@@ -579,7 +629,7 @@ def main():
     knn, knn_pairs = knn_stage(df)
     pca = add_cost(pca, rt, cold) if len(pca) else pca
     knn = add_cost(knn, rt, cold) if len(knn) else knn
-    stage_conc = pd.concat([pca_concordance(pca, args.n_perm), knn_concordance(knn, args.n_perm)],
+    stage_conc = pd.concat([pca_concordance(pca), knn_concordance(knn), cluster_concordance(runs)],
                            ignore_index=True)
     ans = answers(runs, rt, cold)
     stages = stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold)
@@ -596,14 +646,19 @@ def main():
     for name, t in tables.items():
         t.drop(columns=[c for c in drop if c in t.columns and name != "jobs"]).to_csv(
             out / f"phase2_{name}.tsv", sep="\t", index=False)
-    if not args.no_concordance:
-        # Phase 1's concordance tables with "size" = dataset/subsample (report.py's definitions).
-        tabs, _ = report.compute(df, n_perm=args.n_perm)
-        for k, t in tabs.items():
-            if isinstance(t, pd.DataFrame) and len(t):
-                t.to_csv(out / f"phase2_concordance_{k}.tsv", sep="\t", index=False)
     print(f"wrote {out}/phase2_*.tsv: {len(runs)} clusterings, {len(stages)} stage rows, "
           f"{len(pipes)} named-pipeline rows")
+    if not args.no_report:
+        render_report(out)
+
+
+def render_report(out):
+    """Render report/phase2.qmd from the TSVs in `out` to out/phase2.html (needs quarto)."""
+    out = out.resolve()
+    qmd = Path(__file__).resolve().parent.parent / "report" / "phase2.qmd"
+    subprocess.run(["quarto", "render", str(qmd), "--output-dir", str(out)], check=True,
+                   env={**os.environ, "PHASE2_RESULTS": str(out)})
+    print(f"wrote {out / 'phase2.html'}")
 
 
 if __name__ == "__main__":
