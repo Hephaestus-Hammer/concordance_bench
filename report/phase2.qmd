@@ -6,7 +6,7 @@ format:
     embed-resources: true
     page-layout: full
     theme: default
-    html-math-method: plain
+    html-math-method: mathml
     include-in-header:
       text: |
         <style>
@@ -22,6 +22,10 @@ format:
         .p2-sliders label { display: inline-block; margin: 0 1.2rem 0.4rem 0; font-size: 0.85rem; }
         .p2-sliders input[type=range] { width: 140px; vertical-align: middle; }
         td.best { font-weight: bold; background: #e3e8fd !important; }
+        .metric { border-left: 3px solid #425fed; padding: 0.2rem 0 0.2rem 0.9rem; margin: 0.6rem 0 1rem; }
+        .metric .legend { font-size: 0.85rem; color: #444; }
+        .metric .legend td { white-space: normal; background: none !important; padding: 1px 8px 1px 0; }
+        details > summary { cursor: pointer; color: #425fed; font-size: 0.85rem; margin: 0.2rem 0; }
         </style>
 execute:
   echo: false
@@ -32,9 +36,10 @@ jupyter: python3
 ```{python}
 # Reads analysis/phase2.py's TSVs from $PHASE2_RESULTS (default ../results/phase2).
 # Render: `pixi run report2`, or PHASE2_RESULTS=<dir> quarto render report/phase2.qmd
-# Figures are static matplotlib images, one set per Leiden resolution; the resolution slider
-# shows one set at a time. The trade-off and threshold views are computed in the page from the
-# embedded table. Plain JavaScript, no libraries: one self-contained HTML file that works offline.
+# Figures: box plots of every individual observation (points) per dataset and size, static
+# matplotlib images, one set per Leiden resolution; the resolution slider shows one set at a time.
+# The trade-off and threshold views are computed in the page. Formulas are MathML. Plain
+# JavaScript, no libraries: one self-contained HTML file that works offline.
 import base64
 import html
 import io
@@ -47,6 +52,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
+from matplotlib.patches import Patch
 
 sys.path.insert(0, str(Path("../analysis").resolve()))
 import figures as fg  # omnicol and the shared figure style
@@ -59,12 +65,12 @@ def tsv(name):
     return pd.read_csv(p, sep="\t", dtype={"res_key": str}) if p.exists() else pd.DataFrame()
 
 
-bounds, runs, stages = tsv("bounds"), tsv("runs"), tsv("stages")
-pipes, pipe_runs, stage_conc = tsv("pipelines"), tsv("pipelines_runs"), tsv("stage_concordance")
-if not len(stages) or "res_key" not in stages.columns:
-    raise RuntimeError(f"no per-resolution phase2_stages.tsv in {R}: run analysis/phase2.py first")
+bounds, runs, stages, obs = tsv("bounds"), tsv("runs"), tsv("stages"), tsv("obs")
+pipes, stage_conc = tsv("pipelines"), tsv("stage_concordance")
+if not len(stages) or "res_key" not in stages.columns or not len(obs):
+    raise RuntimeError(f"no per-resolution phase2_stages.tsv / phase2_obs.tsv in {R}: run analysis/phase2.py first")
 
-ORACLE = "oracle"
+ORACLE, ANY = "oracle", "*"
 RES_KEYS = [ORACLE] + sorted((k for k in stages["res_key"].unique() if k != ORACLE), key=float)
 datasets = sorted(stages["dataset"].unique())
 PIPE_ORDER = ["baseline", "scanpy-defaults", "tuned-cpu", "all-gpu", "hybrid"]
@@ -73,9 +79,10 @@ MOD_COLOUR = {}
 for s_ in ("pca", "knn", "cluster"):
     for i, m in enumerate(sorted(stages.loc[stages["stage"] == s_, "module"].unique())):
         MOD_COLOUR[m] = fg.OMNICOL[i % len(fg.OMNICOL)]
-MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
+GREYS = ["#8c8b87", "#b0afab", "#6b6a66", "#c8c7c3", "#5e5d59", "#a3a29e", "#3d3c3a", "#d9d8d4"]
 STAGE_NAME = {"pca": "PCA", "knn": "kNN", "cluster": "Leiden"}
 GPU = lambda k: "rapids" in str(k) or "gpu" in str(k) or k == "hybrid"  # noqa: E731
+CELLS = {(r["dataset"], r["subsample"]): r["cells"] for _, r in bounds.iterrows()}
 
 
 def raw(s):
@@ -83,8 +90,8 @@ def raw(s):
     print(f"\n```{{=html}}\n{s}\n```\n")
 
 
-def table(df, digits=3):
-    """A DataFrame as a plain HTML table: no notebook widget machinery, no remote scripts."""
+def table(df, digits=3, title="Table of medians"):
+    """A DataFrame as a plain HTML table, folded away under a summary line."""
     def cell(v):
         if isinstance(v, (float, np.floating)):
             return "—" if not np.isfinite(v) else f"{v:.{digits}f}"
@@ -92,7 +99,8 @@ def table(df, digits=3):
     head = "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns)
     body = "".join("<tr>" + "".join(f"<td>{cell(v)}</td>" for v in row) + "</tr>"
                    for row in df.itertuples(index=False))
-    raw(f'<div class="tbl"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>')
+    raw(f'<details><summary>{html.escape(title)}</summary><div class="tbl"><table><thead><tr>{head}</tr></thead>'
+        f'<tbody>{body}</tbody></table></div></details>')
 
 
 def show(fig):
@@ -109,42 +117,58 @@ def plain_log(axis):
     axis.set_minor_formatter(mticker.NullFormatter())
 
 
-def panels(data, y, ylabel, group, colours, logy=False, floors=None, note=None):
-    """One panel per dataset: y against cells, one line per group, each with its own marker so
-    lines on top of each other stay visible. GPU (rapids) dashed. floors: optional frame with
-    dataset, cells, label, value drawn as grey dotted lines."""
-    if not len(data) or data[y].dropna().empty:
+def boxes(o, ylabel, colours, order=None, logy=False, note=None):
+    """Box plots with every observation as a point: one panel per dataset, the sizes along x
+    (smallest first), one box per group side by side. GPU groups have dashed boxes; groups
+    missing from `colours` are drawn grey (seed floors)."""
+    o = o.dropna(subset=["value"])
+    if not len(o):
         print("\n_Nothing to show here._\n")
         return
-    fig, axes = plt.subplots(1, len(datasets), figsize=(max(5.5, 3.4 * len(datasets)), 3.2), sharey=True,
-                             constrained_layout=True, squeeze=False)
-    seen = {}
+    groups = [g for g in (order or sorted(o["group"].unique())) if g in set(o["group"])]
+    greys = {g: GREYS[i % len(GREYS)] for i, g in enumerate(x for x in groups if x not in colours)}
+    col = {g: colours.get(g, greys.get(g)) for g in groups}
+    n_sizes = max(o.groupby("dataset")["cells"].nunique())
+    width = min(18, max(6.5, 0.3 * len(groups) * n_sizes * len(datasets) + 2))
+    fig, axes = plt.subplots(1, len(datasets), figsize=(width, 3.4), sharey=True, constrained_layout=True,
+                             squeeze=False)
+    rng = np.random.default_rng(0)
+    w = 0.8 / len(groups)
     for ax, d in zip(axes[0], datasets):
-        s = data[data["dataset"] == d].sort_values("cells")
-        if floors is not None and len(floors):
-            for lab, f in floors[floors["dataset"] == d].sort_values("cells").groupby("label"):
-                h = ax.plot(f["cells"], f["value"], ls=":", lw=1.2, color="#8c8b87")[0]
-                seen.setdefault("own seed noise (grey)", h)
-        for i, (key, g) in enumerate(s.groupby(group, sort=True)):
-            g = g.dropna(subset=[y])
-            if len(g):
-                seen[key] = ax.plot(g["cells"], g[y], marker=MARKERS[i % len(MARKERS)], ms=5 - 0.4 * (i % 4),
-                                    lw=1.4, ls="--" if GPU(key) else "-", mfc="none" if i % 2 else None,
-                                    color=colours.get(key, "#52514e"))[0]
-        ax.set_xscale("log")
-        ticks = sorted(s["cells"].dropna().unique())
-        ax.set_xticks(ticks, [f"{c / 1000:g}k" for c in ticks])
-        ax.xaxis.set_minor_formatter(mticker.NullFormatter())
+        sub = o[o["dataset"] == d]
+        sizes = sorted(sub["cells"].unique())
+        for gi, g in enumerate(groups):
+            for xi, c in enumerate(sizes):
+                v = sub[(sub["group"] == g) & (sub["cells"] == c)]["value"].to_numpy()
+                if not len(v):
+                    continue
+                pos = xi - 0.4 + w * (gi + 0.5)
+                bp = ax.boxplot([v], positions=[pos], widths=w * 0.8, patch_artist=True, showfliers=False,
+                                medianprops={"color": col[g], "lw": 1.6},
+                                boxprops={"facecolor": col[g] + "33", "edgecolor": col[g], "linestyle": "--" if GPU(g) else "-"},
+                                whiskerprops={"color": col[g]}, capprops={"color": col[g]})
+                ax.scatter(pos + rng.uniform(-w * 0.28, w * 0.28, len(v)), v, s=8, color=col[g], alpha=0.75,
+                           zorder=3, linewidths=0)
+        ax.set_xticks(range(len(sizes)), [f"{c / 1000:g}k" for c in sizes])
+        ax.set_xlim(-0.55, len(sizes) - 0.45)
+        ax.grid(axis="x", visible=False)
+        for xi in range(1, len(sizes)):
+            ax.axvline(xi - 0.5, color="#e4e3df", lw=0.8)
         if logy:
             ax.set_yscale("log")
             plain_log(ax.yaxis)
         ax.set_title(d, loc="left")
         ax.set_xlabel("cells")
     axes[0][0].set_ylabel(ylabel)
-    fig.legend(seen.values(), seen.keys(), loc="outside right center", frameon=False, fontsize=7)
+    handles = [Patch(facecolor=col[g] + "33", edgecolor=col[g], ls="--" if GPU(g) else "-", label=g) for g in groups]
+    fig.legend(handles=handles, loc="outside right center", frameon=False, fontsize=7)
     show(fig)
     if note:
         print(f"\n{note}\n")
+
+
+def ob(tab, metric, key=ANY):
+    return obs[(obs["tab"] == tab) & (obs["metric"] == metric) & (obs["res_key"] == key)]
 
 
 def per_res(fn):
@@ -168,94 +192,233 @@ def cols(t, names):
     return t[[c for c in names if c in t.columns]]
 
 
-def seedless(stage):
-    t = st(stage)
-    m = sorted(t.loc[t["stage_stability"].isna(), "module"].unique())
-    if m:
-        print(f"\n_No seed (exact or deterministic): {', '.join(m)}. Their run-to-run differences are "
-              "**reproducibility**: the same job run again in another output folder._\n")
+BOX_NOTE = ("_Box: quartiles and median; whiskers: 1.5 × the box; points: every observation. "
+            "Dashed boxes: GPU._")
+```
+
+```{python}
+# ---- the metric catalogue: one entry per metric, used by the Metrics tab and by every subtab --
+M = {}
 
 
+def metric(key, name, where, what, formula, legend, scale):
+    M[key] = dict(name=name, where=where, what=what, formula=formula, legend=legend, scale=scale)
+
+
+metric("pca_fidelity", "PCA fidelity", "PCA › Accuracy",
+       "How much of what the exact PCA captures the method's components capture as well. Each exact "
+       "component counts in proportion to the variance it explains, so missing a leading component "
+       "costs far more than missing a trailing one. One number per run.",
+       r"F = \frac{\sum_{i=1}^{k} \lambda_i \,\lVert Q^\top v_i \rVert^2}{\sum_{i=1}^{k} \lambda_i}",
+       [("v_i", "the i-th component (unit loading vector) of the exact PCA"),
+        ("\\lambda_i", "the variance of the data along that component"),
+        ("Q", "an orthonormal basis of the method's k loading vectors"),
+        ("\\lVert Q^\\top v_i \\rVert^2", "the share of that component inside the method's subspace (0 to 1)"),
+        ("k", "the number of components, 50")],
+       "0 to 1; higher is better; 1 = the exact subspace")
+metric("pca_agreement", "PCA agreement", "PCA › Stability, Concordance",
+       "The same idea between two runs that are both approximate: each run's components scored "
+       "against the other's subspace, weighted by its own variances, averaged over the two directions.",
+       r"A(a,b) = \tfrac{1}{2}\left[F_a(b) + F_b(a)\right],\quad F_a(b) = \frac{\sum_i \lambda^a_i \lVert Q_b^\top v^a_i \rVert^2}{\sum_i \lambda^a_i}",
+       [("a, b", "two PCA runs (two seeds, two folders or two implementations)"),
+        ("v^a_i, \\lambda^a_i", "run a's components and their variances"),
+        ("Q_b", "an orthonormal basis of run b's loadings")],
+       "0 to 1; higher = more alike")
+metric("knn_recall", "kNN recall", "kNN › Accuracy",
+       "The share of each cell's exact nearest neighbours that the method finds, averaged over cells. "
+       "The exact neighbours come from brute force on the same embedding.",
+       r"R = \frac{1}{n}\sum_{c=1}^{n} \frac{\lvert N_m(c) \cap N_{\mathrm{ex}}(c) \rvert}{\lvert N_{\mathrm{ex}}(c) \rvert}",
+       [("n", "the number of cells"), ("N_m(c)", "the neighbours of cell c found by the method"),
+        ("N_{\\mathrm{ex}}(c)", "its exact neighbours")],
+       "0 to 1; higher is better; 1 = exact")
+metric("knn_shared", "Shared neighbours", "kNN › Stability, Concordance",
+       "The share of neighbours two runs give each cell in common, averaged over cells.",
+       r"S(a,b) = \frac{1}{n}\sum_{c=1}^{n} \frac{\lvert N_a(c) \cap N_b(c) \rvert}{k}",
+       [("N_a(c), N_b(c)", "the neighbours of cell c in runs a and b"), ("k", "the number of neighbours stored per cell")],
+       "0 to 1; higher = more alike")
+metric("ari", "Adjusted Rand index (ARI)", "Leiden and everything downstream",
+       "Agreement between two partitions of the same cells: the share of cell pairs they treat alike "
+       "(together in both, or apart in both), corrected so that random partitions score 0.",
+       r"\mathrm{ARI} = \frac{\sum_{ij}\binom{n_{ij}}{2} - E}{\tfrac12\left[\sum_i\binom{a_i}{2} + \sum_j\binom{b_j}{2}\right] - E},\quad E = \frac{\sum_i\binom{a_i}{2}\sum_j\binom{b_j}{2}}{\binom{n}{2}}",
+       [("n_{ij}", "cells in cluster i of the first partition and cluster j of the second"),
+        ("a_i, b_j", "cluster sizes in the first and second partition"), ("n", "the number of cells"),
+        ("E", "the value expected for random partitions with these cluster sizes")],
+       "−0.5 to 1; 0 = chance, 1 = identical. Coarse partitions agree more easily than fine ones")
+metric("accuracy", "Accuracy (share of the oracle)", "every Accuracy subtab, Full pipeline",
+       "How well the final clusters recover the reference labels, on a scale from chance to the best "
+       "any method could do on this data. The oracle is supervised: a classifier trained on the labels "
+       "(cross-validated logistic regression or 15-nearest-neighbour vote on the exact embedding, the "
+       "better of the two). An unsupervised pipeline is not expected to reach it.",
+       r"\mathrm{acc} = \frac{\mathrm{ARI}(\text{clusters}, \text{labels}) - 0}{O - 0},\quad O = \max(\mathrm{ARI}_{\text{logreg}}, \mathrm{ARI}_{15\text{-NN}})",
+       [("\\mathrm{ARI}(\\text{clusters}, \\text{labels})", "the ARI between the run's clusters and the reference labels"),
+        ("0", "chance (the ARI of a random partition)"), ("O", "the oracle bound for this dataset and size")],
+       "0 = chance, 1 = as good as the oracle; higher is better")
+metric("stability", "Stability", "every Stability subtab, Full pipeline",
+       "How much the result changes when only a random seed changes: the agreement between every pair "
+       "of runs in one output folder that differ only in the seed of the part being studied (one stage "
+       "in a stage tab; every stage together in Full pipeline). The box shows all pairs; the summary is "
+       "the median. Modules without a seed have no stability, only reproducibility.",
+       r"\mathrm{Stab} = \operatorname{median}_{s \neq t}\; \mathrm{sim}(\text{run}_s, \text{run}_t)",
+       [("s, t", "two seeds, same folder"), ("\\mathrm{sim}", "the stage's own measure (A, S or ARI) or, downstream, the ARI of the final clusters")],
+       "same scale as sim; higher = more stable")
+metric("reproducibility", "Reproducibility", "every Stability subtab, Full pipeline",
+       "The same seed run again in another output folder: does the identical job give the identical "
+       "result? Needs at least two output folders (replicate runs).",
+       r"\mathrm{Rep} = \operatorname{median}_{f \neq g}\; \mathrm{sim}(\text{run}^{f}_s, \text{run}^{g}_s)",
+       [("f, g", "two output folders"), ("s", "the same seed in both")],
+       "same scale as sim; 1 = deterministic")
+metric("downstream", "Downstream stability and accuracy", "PCA and kNN › Stability, Accuracy",
+       "The effect of a PCA or kNN choice on the final clusters: the rest of the pipeline is held at "
+       "the exact baselines with Leiden at seed 0, so any change in the clusters comes from this stage.",
+       r"\mathrm{Stab}_{\downarrow} = \operatorname{median}_{s \neq t} \mathrm{ARI}\big(L(\text{stage}_s), L(\text{stage}_t)\big)",
+       [("\\text{stage}_s", "the stage's output at seed s"), ("L", "baseline kNN and Leiden (seed 0) applied downstream")],
+       "ARI; higher is better")
+metric("gap", "Concordance gap", "every Concordance subtab",
+       "Do two implementations disagree more than each disagrees with itself? The gap compares the "
+       "median agreement between their runs with each one's own seed floor (the median agreement "
+       "between its own seeds). No significance test: the size of the gap is the result.",
+       r"\mathrm{gap}_A = \operatorname{median}_{s\neq t}\mathrm{sim}(A_s, A_t) - \operatorname{median}_{s,t}\mathrm{sim}(A_s, B_t)",
+       [("A_s, B_t", "a run of implementation A at seed s and of B at seed t, on the same upstream, in one folder"),
+        ("\\mathrm{gap}_A > 0", "switching to B changes the result more than re-seeding A does")],
+       "around 0 = interchangeable; positive = a real difference")
+metric("oracle_res", "Oracle resolution", "the resolution slider",
+       "The Leiden resolution with the best median accuracy over seeds, chosen once per implementation "
+       "or pipeline and dataset size (never per seed). It needs the labels, so a user cannot choose it: "
+       "it is the best case. The slider can show any fixed resolution instead.",
+       r"r^{*} = \arg\max_{r} \operatorname{median}_{s} \mathrm{ARI}(\text{clusters}_{r,s}, \text{labels})",
+       [("r", "a resolution of the sweep"), ("s", "a seed")], "")
+metric("wall", "Wall time", "every Cost subtab",
+       "Elapsed time of a job from start to end, start-up and imports included, queue excluded, with "
+       "empty compilation caches (each job compiles what it needs, as on a first run). Per answer "
+       "(Full pipeline): the stages one after another; at a fixed resolution one Leiden run, at the "
+       "oracle resolution every resolution of the sweep, since choosing needs them all. The first "
+       "rapids job of a module in a folder is a cold start and is left out where there are others.",
+       r"T = T_{\mathrm{PCA}} + T_{\mathrm{kNN}} + \sum_{r \in \mathcal{R}} T_{\mathrm{Leiden}}(r)",
+       [("\\mathcal{R}", "one resolution, or the whole sweep at the oracle resolution")],
+       "seconds; lower is better")
+metric("memory", "Peak memory", "every Cost subtab",
+       "The most memory a job held at once, from denet: peak RAM of the job's process tree plus its "
+       "peak GPU memory. An answer's peak is the largest of its jobs' (the stages run one after another).",
+       r"M = \max_{\text{jobs}} \left(\mathrm{RSS}_{\mathrm{peak}} + \mathrm{GPU}_{\mathrm{peak}}\right)",
+       [("\\mathrm{RSS}_{\\mathrm{peak}}", "peak resident memory in RAM, GB"),
+        ("\\mathrm{GPU}_{\\mathrm{peak}}", "peak GPU memory, GB (0 for CPU jobs)")],
+       "GB; lower is better")
+metric("cost", "Effective cost", "Full pipeline › Trade-off and thresholds",
+       "Wall time, charged extra for memory above a budget: free up to the budget, proportional above "
+       "it, so a pipeline that needs twice the budget costs twice its wall time. The budget is a slider.",
+       r"C = T \times \max\!\left(1, \frac{M}{B}\right)",
+       [("T", "wall time per answer"), ("M", "peak memory of the answer, GB"), ("B", "the memory budget, GB")],
+       "seconds; lower is better")
+metric("tradeoff", "Trade-off score", "Full pipeline › Trade-off and thresholds",
+       "One number per pipeline, dataset and size combining the three: accuracy and stability on their "
+       "0–1 scales, cost as how many times slower than the cheapest pipeline (log10, so 10× slower "
+       "costs one point). Absolute scales: a pipeline's score does not change when another is added.",
+       r"\mathrm{score} = w_{\mathrm{acc}} \cdot \mathrm{acc} + w_{\mathrm{stab}} \cdot \mathrm{Stab} - w_{\mathrm{cost}} \cdot \log_{10}\frac{C}{C_{\min}}",
+       [("w", "the weights (sliders): how much each matters to you"),
+        ("C_{\\min}", "the cheapest pipeline's effective cost at that dataset and size")],
+       "higher is better")
+
+
+def explain(*keys):
+    """The metrics' description, formula and legend, as used in a subtab."""
+    for k in keys:
+        m = M[k]
+        print(f'\n:::: {{.metric}}\n**{m["name"]}.** {m["what"]}\n\n$${m["formula"]}$$\n')
+        if m["legend"] or m["scale"]:
+            print("\n::: {.legend}\n")
+            for a, b in m["legend"]:
+                print(f"- ${a}$: {b}")
+            if m["scale"]:
+                print(f"\n_Scale:_ {m['scale']}.")
+            print("\n:::\n")
+        print("\n::::\n")
+```
+
+```{python}
 # ---- the four subtabs, one function each, the same for every stage ------------------------
 
 def stability(stage):
     if stage == "cluster":
+        explain("stability", "ari")
+
         def pane(k):
-            t = st(stage, k)
-            print(f"Agreement (ARI) between runs of one Leiden that differ only in its seed, {res_text(k)}; "
-                  "reproducibility: the same seed run again in another folder.\n")
-            panels(t, "stage_stability", "stability (ARI between seeds)", "module", MOD_COLOUR,
-                   note="_Solid: CPU; dashed: GPU._")
-            table(cols(t, ["module", "dataset", "size", "cells", "resolution", "stage_stability", "stage_reproducibility"]))
+            print(f"Leiden at {res_text(k).replace('at ', '')}, on exact PCA and kNN.\n")
+            boxes(ob(stage, "downstream_stability", k), "stability (ARI between seeds)", MOD_COLOUR, note=BOX_NOTE)
+            if len(ob(stage, "downstream_reproducibility", k)):
+                boxes(ob(stage, "downstream_reproducibility", k), "reproducibility (ARI, same seed)", MOD_COLOUR)
+            table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "stage_stability",
+                                       "stage_reproducibility"]))
         per_res(pane)
         return
-    measure = "variance-weighted subspace agreement" if stage == "pca" else "shared neighbours"
+    own = "pca_agreement" if stage == "pca" else "knn_shared"
+    measure = M[own]["name"].lower()
+    explain("stability", own)
+    print(f"#### On the stage's own measure\n")
+    boxes(ob(stage, "stage_stability"), f"stability ({measure})", MOD_COLOUR, note=BOX_NOTE)
     t = st(stage)
-    print(f"**On the stage's own measure** ({measure}): agreement between runs of one {STAGE_NAME[stage]} "
-          "that differ only in its seed.\n")
-    panels(t, "stage_stability", f"stability ({measure})", "module", MOD_COLOUR)
-    seedless(stage)
-    if t["stage_reproducibility"].notna().any():
-        panels(t, "stage_reproducibility", f"reproducibility ({measure})", "module", MOD_COLOUR)
+    m = sorted(t.loc[t["stage_stability"].isna(), "module"].unique())
+    if m:
+        print(f"\n_No seed (exact or deterministic): {', '.join(m)}. Their run-to-run differences are "
+              "reproducibility._\n")
+    if len(ob(stage, "stage_reproducibility")):
+        boxes(ob(stage, "stage_reproducibility"), f"reproducibility ({measure})", MOD_COLOUR)
     table(cols(t, ["module", "dataset", "size", "cells", "stage_stability", "stage_reproducibility"]))
+    print(f"#### Downstream: the final clusters\n")
+    explain("downstream")
 
     def pane(k):
-        t = st(stage, k)
         res = ("the baseline pipeline's oracle resolution" if k == ORACLE else f"resolution {k}")
-        print(f"**Downstream**: the ARI of the final clusters (baseline Leiden, seed 0, at {res}) between "
-              f"runs that differ only in the {STAGE_NAME[stage]} seed.\n")
-        panels(t, "downstream_stability", "downstream stability (ARI)", "module", MOD_COLOUR,
-               note="_Solid: CPU; dashed: GPU._")
-        table(cols(t, ["module", "dataset", "size", "cells", "resolution", "downstream_stability",
-                       "downstream_reproducibility"]))
+        print(f"Leiden at {res}.\n")
+        boxes(ob(stage, "downstream_stability", k), "downstream stability (ARI)", MOD_COLOUR, note=BOX_NOTE)
+        table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "downstream_stability",
+                                   "downstream_reproducibility"]))
     per_res(pane)
 
 
-def _conc_panels(c, t, ylabel, floor_col):
-    c = c.merge(t[["dataset", "size", "cells"]].drop_duplicates(), on=["dataset", "size"])
-    c["pair"] = c["A"] + " vs " + c["B"]
-    floors = t.dropna(subset=[floor_col]).assign(label=lambda x: x["module"], value=lambda x: x[floor_col])
-    panels(c, "between median", ylabel, "pair",
-           {p: fg.OMNICOL[i % len(fg.OMNICOL)] for i, p in enumerate(sorted(c["pair"].unique()))}, floors=floors)
-    table(cols(c.sort_values(["dataset", "cells", "A", "B"]),
+def _conc(stage, k, measure):
+    c = ob(stage, "between", k)
+    floors = ob(stage, "stage_stability" if stage != "cluster" else "downstream_stability",
+                ANY if stage != "cluster" else k)
+    floors = floors.assign(group=floors["group"] + " (own seeds)")
+    o = pd.concat([c, floors])
+    pairs = sorted(c["group"].unique())
+    colours = {p: fg.OMNICOL[i % len(fg.OMNICOL)] for i, p in enumerate(pairs)}
+    boxes(o, measure, colours, order=pairs + sorted(floors["group"].unique()),
+          note=BOX_NOTE + " _Grey: each implementation's own seed floor._")
+    t = stage_conc[stage_conc["stage"] == stage]
+    if "res_key" in t.columns and stage == "cluster":
+        t = t[t["res_key"] == k]
+    t = t.rename(columns={"subsample": "size"}).assign(cells=lambda x: [CELLS.get((d, s)) for d, s in zip(x["dataset"], x["size"])])
+    table(cols(t.sort_values(["dataset", "cells", "A", "B"]),
                ["dataset", "size", "A", "B", "within A median", "within B median", "between median", "gap A", "gap B"]), 4)
 
 
-CONC_NOTE = ("**Gap** = a module's own seed floor − agreement between the two. **Positive**: switching "
-             "implementation moves the result further than re-seeding that one does. Against a module "
-             "without a seed (one run), only the seeded side's gap is defined.")
-
-
 def concordance(stage):
-    c = stage_conc[stage_conc["stage"] == stage].rename(columns={"subsample": "size"}) if len(stage_conc) else pd.DataFrame()
-    if not len(c):
-        print("_No pairs._\n")
+    if not len(ob(stage, "between", ORACLE if stage == "cluster" else ANY)):
+        print("_No pairs of implementations here._\n")
         return
+    own = {"pca": "pca_agreement", "knn": "knn_shared", "cluster": "ari"}[stage]
+    explain("gap", own)
     if stage == "cluster":
         def pane(k):
-            t = st(stage, k)
-            ck = c[c["res_key"] == k]
             res = "the baseline Leiden's oracle resolution" if k == ORACLE else f"resolution {k}"
-            print(f"Do two Leiden implementations find the same partitions (ARI), beyond what each one's own "
-                  f"seed noise (grey) explains? At {res}, on exact PCA and kNN. {CONC_NOTE}\n")
-            if len(ck):
-                _conc_panels(ck, t, "ARI between implementations", "stage_stability")
+            print(f"At {res}, on exact PCA and kNN. Coloured: agreement between two implementations (every "
+                  "pair of their seeds).\n")
+            _conc(stage, k, "ARI")
         per_res(pane)
         return
-    measure = "variance-weighted subspace agreement" if stage == "pca" else "shared neighbours"
-    print(f"Agreement between two {STAGE_NAME[stage]} implementations on the stage's own measure "
-          f"({measure}), against each one's own seed noise (grey). {CONC_NOTE}\n")
-    _conc_panels(c, st(stage), "subspace agreement" if stage == "pca" else "shared neighbours", "stage_stability")
+    print("Coloured: agreement between two implementations (every pair of their seeds, same upstream).\n")
+    _conc(stage, ANY, M[own]["name"].lower())
 
 
 def accuracy(stage):
     if stage == "cluster":
+        explain("accuracy", "oracle_res")
+
         def pane(k):
-            t = st(stage, k)
-            print("ARI of the final clusters against the reference labels, as a share of the oracle bound "
-                  f"(1: as good as a classifier trained on the labels), {res_text(k)}.\n")
-            panels(t, "accuracy_share", "accuracy (share of oracle)", "module", MOD_COLOUR)
-            table(cols(t, ["module", "dataset", "size", "cells", "resolution", "accuracy_ari", "accuracy_share"]))
+            print(f"Leiden {res_text(k)}, on exact PCA and kNN.\n")
+            boxes(ob(stage, "accuracy_share", k), "accuracy (share of oracle)", MOD_COLOUR, note=BOX_NOTE)
+            table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "accuracy_ari", "accuracy_share"]))
         per_res(pane)
         sl = runs[runs["varies"].isin(["none", "cluster"]) & runs["pca_seed"].astype(str).isin(["0", "nan"])
                   & runs["knn_seed"].astype(str).isin(["0", "nan"])]
@@ -264,105 +427,62 @@ def accuracy(stage):
         acc = acc.merge(bounds.rename(columns={"subsample": "size"})[["dataset", "size", "cells"]], on=["dataset", "size"])
         acc = acc.sort_values(["module", "dataset", "cells"]).drop(columns="cells")
         acc.columns = [f"res {c:g}" if isinstance(c, float) else c for c in acc.columns]
-        print("**Median ARI at every resolution** (each row's best is its oracle resolution)\n")
-        table(acc)
+        table(acc, title="Median ARI against the labels at every resolution (each row's best is its oracle resolution)")
         return
-    what = ("share of the exact top-50 variance the method's subspace holds" if stage == "pca"
-            else "recall of the exact (brute-force) neighbours")
-    print(f"**Fidelity to exact**: {what}.\n")
-    t = st(stage)
-    panels(t, "fidelity", "fidelity to exact", "module", MOD_COLOUR)
+    fid = "pca_fidelity" if stage == "pca" else "knn_recall"
+    explain(fid)
+    boxes(ob(stage, "fidelity"), "fidelity to exact", MOD_COLOUR, note=BOX_NOTE)
+    print("#### Downstream accuracy\n")
+    explain("accuracy", "downstream")
 
     def pane(k):
-        t = st(stage, k)
         res = ("the baseline pipeline's oracle resolution, so another resolution cannot rescue a worse "
                f"{STAGE_NAME[stage]}" if k == ORACLE else f"resolution {k}")
-        print("**Downstream accuracy**: ARI of the final clusters (baseline Leiden, seed 0) against the labels, "
-              f"as a share of the oracle bound, at {res}.\n")
-        panels(t, "accuracy_share", "downstream accuracy (share of oracle)", "module", MOD_COLOUR,
-               note="_Solid: CPU; dashed: GPU._")
-        table(cols(t, ["module", "dataset", "size", "cells", "resolution", "fidelity", "accuracy_ari", "accuracy_share"]))
+        print(f"Baseline Leiden, seed 0, at {res}.\n")
+        boxes(ob(stage, "accuracy_share", k), "downstream accuracy (share of oracle)", MOD_COLOUR, note=BOX_NOTE)
+        table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "fidelity", "accuracy_ari",
+                                   "accuracy_share"]))
     per_res(pane)
 
 
 def cost(stage):
-    note = ("Start-up and imports included, queue excluded. Cold starts (the first rapids job of a module "
-            "in a folder) left out where there are others.")
+    explain("wall", "memory")
     if stage == "cluster":
         def pane(k):
-            t = st(stage, k)
-            print(f"Wall time of one Leiden run, {res_text(k)}. {note}\n")
-            panels(t, "cost_s", "wall time (s)", "module", MOD_COLOUR, logy=True, note="_Solid: CPU; dashed: GPU._")
-            table(cols(t, ["module", "dataset", "size", "cells", "resolution", "cost_s"]), 2)
+            print(f"One Leiden run, {res_text(k)}.\n")
+            boxes(ob(stage, "cost_s", k), "wall time (s)", MOD_COLOUR, logy=True, note=BOX_NOTE)
+            boxes(ob(stage, "mem_gb", k), "peak memory (GB)", MOD_COLOUR, logy=True)
+            table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "cost_s", "mem_gb"]), 2)
         per_res(pane)
         return
-    t = st(stage)
-    print(f"Wall time of the {STAGE_NAME[stage]} job. {note}\n")
-    panels(t, "cost_s", "wall time (s)", "module", MOD_COLOUR, logy=True, note="_Solid: CPU; dashed: GPU._")
-    table(cols(t, ["module", "dataset", "size", "cells", "cost_s"]), 2)
+    boxes(ob(stage, "cost_s"), "wall time (s)", MOD_COLOUR, logy=True, note=BOX_NOTE)
+    boxes(ob(stage, "mem_gb"), "peak memory (GB)", MOD_COLOUR, logy=True)
+    table(cols(st(stage), ["module", "dataset", "size", "cells", "cost_s", "mem_gb"]), 2)
 
-
-# ---- Full pipeline ----------------------------------------------------------------------
 
 def pipeline_pane(k):
     p = pipes[pipes["res_key"] == k].rename(columns={"subsample": "size"})
     if not len(p):
         print("_No pipeline results at this resolution._\n")
         return
-    pr = pipe_runs[pipe_runs["res_key"] == k].rename(columns={"subsample": "size"})
     if k == ORACLE:
-        print("Each pipeline at **its own oracle resolution**; cost per answer = PCA + kNN + Leiden at "
+        print("Each pipeline at **its own oracle resolution**; wall time per answer = PCA + kNN + Leiden at "
               "**every** resolution of the sweep, since choosing the best needs them all.\n")
     else:
-        print(f"Every pipeline at **resolution {k}**; cost per answer = PCA + kNN + **one** Leiden run.\n")
-    fig, axes = plt.subplots(1, len(datasets), figsize=(max(5.5, 3.4 * len(datasets)), 3.2), sharey=True,
-                             constrained_layout=True, squeeze=False)
-    for ax, d in zip(axes[0], datasets):
-        cells_max = p.loc[p["dataset"] == d, "cells"].max()
-        sub = pr[(pr["dataset"] == d) & pr["size"].isin(p.loc[(p["dataset"] == d) & (p["cells"] == cells_max), "size"])]
-        for name in PIPE_ORDER:
-            v = np.sort(sub.loc[sub["named"] == name, "accuracy_share"].dropna().to_numpy())
-            if len(v):
-                ax.step(np.r_[v[0], v], np.r_[0, np.arange(1, len(v) + 1) / len(v)], where="post",
-                        color=PIPE_COLOUR[name], lw=1.6, ls="--" if GPU(name) else "-", label=name)
-        for x in (0, 1):
-            ax.axvline(x, color="#8c8b87", ls=":", lw=1)
-        ax.set_title(f"{d} · {cells_max / 1000:g}k cells", loc="left")
-        ax.set_xlabel("accuracy (share of oracle)")
-    axes[0][0].set_ylabel("share of runs ≤ x")
-    h, l = axes[0][0].get_legend_handles_labels()
-    fig.legend(h, l, loc="outside right center", frameon=False, fontsize=7)
-    show(fig)
-    print("\n_Accuracy over seeds at each dataset's largest size; grey: chance (0) and oracle (1)._\n")
-    panels(p, "accuracy_share", "accuracy (share of oracle)", "pipeline", PIPE_COLOUR)
-    panels(p, "stability", "stability (ARI between seeds)", "pipeline", PIPE_COLOUR)
-    if p["reproducibility"].notna().any():
-        panels(p, "reproducibility", "reproducibility (ARI, same seed)", "pipeline", PIPE_COLOUR)
-    panels(p, "cost_s", "wall time per answer (s)", "pipeline", PIPE_COLOUR, logy=True,
-           note="_Dashed: pipelines with GPU stages._")
+        print(f"Every pipeline at **resolution {k}**; wall time per answer = PCA + kNN + **one** Leiden run.\n")
+    for metric, label, logy in (("accuracy_share", "accuracy (share of oracle)", False),
+                                ("stability", "stability (ARI between seeds)", False),
+                                ("reproducibility", "reproducibility (ARI, same seed)", False),
+                                ("cost_s", "wall time per answer (s)", True),
+                                ("mem_gb", "peak memory per answer (GB)", True)):
+        o = ob("pipeline", metric, k)
+        if len(o):
+            print(f"\n**{label[0].upper() + label[1:]}**\n")
+            boxes(o, label, PIPE_COLOUR, order=PIPE_ORDER, logy=logy,
+                  note=BOX_NOTE if metric == "accuracy_share" else None)
     table(cols(p.sort_values(["dataset", "cells", "pipeline"]),
                ["pipeline", "dataset", "size", "cells", "resolution", "runs", "accuracy_ari", "accuracy_share",
-                "stability", "reproducibility", "cost_s"]))
-    big = p[p["cells"] == p.groupby("dataset")["cells"].transform("max")]
-    trio = [("cost_s", "stability", "cost against stability"), ("cost_s", "accuracy_share", "cost against accuracy"),
-            ("stability", "accuracy_share", "accuracy against stability")]
-    label = {"cost_s": "wall time per answer (s)", "stability": "stability", "accuracy_share": "accuracy (share of oracle)"}
-    print("\n**Two measures at a time**, each dataset at its largest size\n")
-    fig, axes = plt.subplots(len(datasets), 3, figsize=(11, 3.1 * len(datasets)), constrained_layout=True, squeeze=False)
-    for row, d in zip(axes, datasets):
-        sub = big[big["dataset"] == d]
-        for ax, (x, y, title) in zip(row, trio):
-            for _, r in sub.iterrows():
-                ax.scatter(r[x], r[y], s=45, color=PIPE_COLOUR[r["pipeline"]], label=r["pipeline"])
-            if x == "cost_s":
-                ax.set_xscale("log")
-                plain_log(ax.xaxis)
-            ax.set_xlabel(label[x])
-            ax.set_ylabel(label[y])
-            ax.set_title(f"{d} · {sub['cells'].max() / 1000:g}k · {title}", loc="left", fontsize=8)
-    h, l = axes[0][0].get_legend_handles_labels()
-    fig.legend(h, l, loc="outside right center", frameon=False, fontsize=7)
-    show(fig)
+                "stability", "reproducibility", "cost_s", "mem_gb"]))
 ```
 
 ```{python}
@@ -399,13 +519,13 @@ raw(f"""<style>{css}</style>
 
 **Question.** Which PCA → kNN → Leiden pipeline gives the best stability, accuracy and cost, and
 how does that change with the number of cells? Where do differences between implementations
-come from, stage by stage? And when is a GPU worth it, measured rather than assumed? Plan and
-definitions: `docs/phase2-plan.md`.
+come from, stage by stage? And when is a GPU worth it, measured rather than assumed? Plan:
+`docs/phase2-plan.md`; every metric is defined in the **Metrics** tab.
 
 **Design.** Each stage tab reads its own slice of the plan: that stage varies, the other two
 stay at the exact baselines (covariance-eigh PCA, brute-force kNN, leidenalg run to
 convergence) with their seed fixed, so every difference belongs to that stage. The Full
-pipeline tab reads five named end-to-end pipelines with matched seeds.
+pipeline tab reads five named end-to-end pipelines with matched seeds (seed i at every stage).
 
 | Pipeline | PCA | kNN | Leiden |
 |---|---|---|---|
@@ -415,24 +535,35 @@ pipeline tab reads five named end-to-end pipelines with matched seeds.
 | all-gpu | covariance-eigh (GPU) | brute force (GPU) | cuGraph |
 | hybrid | covariance-eigh (GPU) | brute force (GPU) | leidenalg |
 
+**Sizes are a nested ladder.** Every size is cut from one fixed ordering of each dataset's cells:
+the 5k cells are the first 5,000, the 10k cells the first 10,000 (the same 5,000 plus 5,000 more),
+and so on up to all cells. The ordering is stratified by label, so every size keeps each cell
+type's share of the whole dataset to within one cell. Differences between sizes are therefore
+effects of scale, not of drawing other cells.
+
 ```{python}
 #| output: asis
 folders = runs["run"].fillna("").astype(str).nunique() if len(runs) else 0
 print(f"**This report:** {len(runs):,} clusterings, {len(datasets)} dataset(s), {len(bounds)} dataset × "
       f"size combinations, {len(RES_KEYS) - 1} resolutions, {folders} output folder(s)"
       f"{' (same-seed replicates: reproducibility is measured)' if folders > 1 else ' (no replicates: no reproducibility yet)'}.\n")
-table(bounds.sort_values(["dataset", "cells"]).rename(columns={
+b = bounds.sort_values(["dataset", "cells"]).rename(columns={
     "subsample": "size", "oracle_logreg": "oracle: logistic regression", "oracle_knn": "oracle: 15-NN",
     "oracle": "oracle (the better)"})[["dataset", "size", "cells", "labels", "chance", "oracle: logistic regression",
-                                       "oracle: 15-NN", "oracle (the better)"]])
+                                       "oracle: 15-NN", "oracle (the better)"]]
+table(b, title="Datasets, sizes and accuracy bounds")
 ```
 
 | Subtab | What it shows |
 |---|---|
-| **Stability** | Agreement between runs that differ only in a seed, in one output folder; **reproducibility**: the same seed run again in another folder. PCA and kNN on their own measure and downstream (final clusters). Modules without a seed have reproducibility only. |
-| **Concordance** | Agreement between implementations, against each one's own seed noise (grey). No significance tests: the gap is the result. |
-| **Accuracy** | PCA and kNN: **fidelity** to the exact module (variance-weighted share of the exact top-50 variance; recall of the exact neighbours) and downstream accuracy. Leiden: ARI against the reference labels as a share of the range between chance (0) and the oracle bound. |
-| **Cost** | Wall time of the stage's own job; per answer in Full pipeline. |
+| **Stability** | How much the result changes when only a seed changes (same output folder), and **reproducibility**: the same seed run again in another folder. |
+| **Concordance** | How much two implementations disagree, against each one's own seed noise (grey). |
+| **Accuracy** | PCA and kNN: **fidelity** to the exact module, and downstream accuracy. Leiden: agreement with the reference labels as a share of the oracle bound. |
+| **Cost** | Wall time and peak memory of the stage's own job; per answer in Full pipeline. |
+
+**Box plots.** Every figure shows every individual observation as a point (a run, a pair of runs,
+a job), grouped into a box per implementation and size: the box spans the middle half, the line
+is the median, the whiskers reach 1.5 × the box. The tables of medians fold out under each figure.
 
 **Resolution slider** (top of the page). Leiden runs at every resolution of the sweep; the
 slider shows every resolution-dependent result at one of them. At **each method's best
@@ -519,11 +650,13 @@ cost("cluster")
 
 ## Full pipeline
 
-The five named pipelines, as in Ben's deck: accuracy over seeds against the chance and oracle
-bounds, stability, reproducibility and wall time per answer.
+The five named pipelines end to end, as in Ben's deck: accuracy over seeds against the chance
+and oracle bounds, stability, reproducibility, wall time and peak memory per answer; then one
+score and one threshold rule that combine them.
 
 ```{python}
 #| output: asis
+explain("accuracy", "stability", "wall", "memory")
 if not len(pipes):
     print("_No named pipelines in these results: run the pipelines slice (scripts/run_pipelines.sh)._\n")
 else:
@@ -534,22 +667,22 @@ else:
 
 ```{python}
 #| output: asis
+explain("cost", "tradeoff")
 if len(pipes):
     data = pipes.rename(columns={"subsample": "size"})[
-        ["res_key", "dataset", "size", "cells", "pipeline", "accuracy_share", "stability", "cost_s", "log10_cost_vs_fastest"]]
+        ["res_key", "dataset", "size", "cells", "pipeline", "accuracy_share", "stability", "cost_s", "mem_gb"]]
     data = json.loads(data.to_json(orient="records"))
     raw("""
 <div class="p2-sliders">
-<p><b>Trade-off</b> = w<sub>acc</sub> × accuracy (share of oracle) + w<sub>stab</sub> × stability
-− w<sub>cost</sub> × log10(cost / fastest cost at that dataset and size). Absolute scales, so a
-pipeline's score does not change when another is added; the weights are a preference. Best per
-row highlighted. Follows the resolution slider.</p>
+<p>Follows the resolution slider. Best per row highlighted.</p>
+<label>memory budget B <input type="range" id="w-mem" min="0" max="8" step="1" value="4"> <span></span></label><br>
 <label>w<sub>acc</sub> <input type="range" id="w-acc" min="0" max="3" step="0.25" value="1"> <span></span></label>
 <label>w<sub>stab</sub> <input type="range" id="w-stab" min="0" max="3" step="0.25" value="1"> <span></span></label>
 <label>w<sub>cost</sub> <input type="range" id="w-cost" min="0" max="3" step="0.25" value="1"> <span></span></label>
 <div id="p2-trade" class="tbl"></div>
-<p><b>Fastest pipeline meeting both thresholds</b> (no weights): accuracy within the chosen margin
-of the best pipeline at that dataset and size, and stability at least the chosen value.</p>
+<p><b>Fastest pipeline meeting both thresholds</b> (lowest effective cost C, no weights): accuracy
+within the chosen margin of the best pipeline at that dataset and size, and stability at least the
+chosen value.</p>
 <label>accuracy within <input type="range" id="t-acc" min="0" max="25" step="1" value="5"> <span></span></label>
 <label>stability ≥ <input type="range" id="t-stab" min="0.5" max="1" step="0.01" value="0.9"> <span></span></label>
 <div id="p2-thresh" class="tbl"></div>
@@ -558,8 +691,10 @@ of the best pipeline at that dataset and size, and stability at least the chosen
 (function () {
   const rows = """ + json.dumps(data) + """;
   const order = """ + json.dumps(PIPE_ORDER) + """;
+  const budgets = [1, 2, 4, 8, 16, 32, 64, 128, 256];
   const $ = id => document.getElementById(id);
   const fmt = (v, d) => (v === null || v === undefined || !isFinite(v)) ? "—" : v.toFixed(d);
+  const eff = (r, B) => r.cost_s * (isFinite(r.mem_gb) && r.mem_gb !== null ? Math.max(1, r.mem_gb / B) : 1);
   function groups(key) {
     const g = new Map();
     rows.filter(r => r.res_key === key).forEach(r => {
@@ -571,8 +706,10 @@ of the best pipeline at that dataset and size, and stability at least the chosen
   }
   function update() {
     const key = window.p2res ? window.p2res() : "oracle";
+    const B = budgets[+$("w-mem").value];
     const w = {acc: +$("w-acc").value, stab: +$("w-stab").value, cost: +$("w-cost").value};
     const t = {acc: +$("t-acc").value, stab: +$("t-stab").value};
+    $("w-mem").nextElementSibling.textContent = B + " GB";
     $("w-acc").nextElementSibling.textContent = w.acc;
     $("w-stab").nextElementSibling.textContent = w.stab;
     $("w-cost").nextElementSibling.textContent = w.cost;
@@ -583,9 +720,10 @@ of the best pipeline at that dataset and size, and stability at least the chosen
     let h = "<table><thead><tr><th>dataset</th><th>size</th><th>cells</th>" +
             names.map(n => "<th>" + n + "</th>").join("") + "</tr></thead><tbody>";
     gs.forEach(g => {
+      const cmin = Math.min(...g.map(r => eff(r, B)).filter(isFinite));
       const score = {};
       g.forEach(r => {
-        const s = w.acc * r.accuracy_share + w.stab * r.stability - w.cost * r.log10_cost_vs_fastest;
+        const s = w.acc * r.accuracy_share + w.stab * r.stability - w.cost * Math.log10(eff(r, B) / cmin);
         score[r.pipeline] = isFinite(s) ? s : null;
       });
       const vals = Object.values(score).filter(v => v !== null);
@@ -596,25 +734,52 @@ of the best pipeline at that dataset and size, and stability at least the chosen
     });
     $("p2-trade").innerHTML = h + "</tbody></table>";
     let k = "<table><thead><tr><th>dataset</th><th>size</th><th>cells</th><th>fastest pipeline</th>" +
-            "<th>wall time (s)</th><th>pipelines meeting both</th></tr></thead><tbody>";
+            "<th>effective cost (s)</th><th>wall time (s)</th><th>peak memory (GB)</th><th>pipelines meeting both</th></tr></thead><tbody>";
     gs.forEach(g => {
       const bestAcc = Math.max(...g.map(r => r.accuracy_share).filter(isFinite));
       const ok = g.filter(r => r.accuracy_share >= (1 - t.acc / 100) * bestAcc && r.stability >= t.stab)
-                  .sort((a, b) => a.cost_s - b.cost_s);
+                  .sort((a, b) => eff(a, B) - eff(b, B));
       k += "<tr><td>" + g[0].dataset + "</td><td>" + g[0].size + "</td><td>" + g[0].cells + "</td><td>" +
            (ok.length ? ok[0].pipeline : "none meets both") + "</td><td>" +
-           (ok.length ? fmt(ok[0].cost_s, 1) : "—") + "</td><td>" + ok.length + "</td></tr>";
+           (ok.length ? fmt(eff(ok[0], B), 1) : "—") + "</td><td>" + (ok.length ? fmt(ok[0].cost_s, 1) : "—") +
+           "</td><td>" + (ok.length ? fmt(ok[0].mem_gb, 2) : "—") + "</td><td>" + ok.length + "</td></tr>";
     });
     $("p2-thresh").innerHTML = k + "</tbody></table>";
   }
   const prev = window.p2update;
   window.p2update = () => { if (prev) prev(); update(); };
   document.addEventListener("DOMContentLoaded", () => {
-    ["w-acc", "w-stab", "w-cost", "t-acc", "t-stab"].forEach(id => $(id).addEventListener("input", update));
+    ["w-mem", "w-acc", "w-stab", "w-cost", "t-acc", "t-stab"].forEach(id => $(id).addEventListener("input", update));
     update();
   });
 })();
 </script>""")
+```
+
+## Metrics
+
+Every metric in this report: what it measures, how it is computed, and where it appears.
+
+```{python}
+#| output: asis
+groups_ = [("PCA", ["pca_fidelity", "pca_agreement"]), ("kNN", ["knn_recall", "knn_shared"]),
+           ("Clustering and the final clusters", ["ari", "accuracy", "oracle_res"]),
+           ("Across stages", ["stability", "reproducibility", "downstream", "gap"]),
+           ("Cost", ["wall", "memory", "cost"]), ("Summary", ["tradeoff"])]
+for title, keys in groups_:
+    print(f"\n### {title}\n")
+    for k in keys:
+        print(f"\n_Used in: {M[k]['where']}_\n")
+        explain(k)
+print("\n### Which measure each subtab uses\n")
+print("""
+| | Stability | Concordance | Accuracy | Cost |
+|---|---|---|---|---|
+| **PCA** | PCA agreement between seeds; downstream ARI | PCA agreement between implementations, gap | PCA fidelity; downstream accuracy | wall time, peak memory |
+| **kNN** | shared neighbours between seeds; downstream ARI | shared neighbours between implementations, gap | kNN recall; downstream accuracy | wall time, peak memory |
+| **Clustering** | ARI between seeds | ARI between implementations, gap | accuracy | wall time, peak memory (one Leiden run) |
+| **Full pipeline** | ARI between seeds (all stages) | — | accuracy | wall time, peak memory per answer; effective cost |
+""")
 ```
 
 ::::::
