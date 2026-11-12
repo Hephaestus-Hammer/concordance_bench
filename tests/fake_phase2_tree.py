@@ -41,7 +41,27 @@ def _node(parent, stage, module, params):
         (d / "parameters.json").write_text(json.dumps(params))
         s = SECS[module if module in SECS else stage]
         (d / "performance.txt").write_text(BENCH.format(s=s, m=100 + s))
+        _denet(d, s, 100 + s, 512 if "rapids" in module else None)
     return d
+
+
+_CLOCK = [1_000_000.0]
+
+
+def _denet(d, s, rss_mb, gpu_mb):
+    """A minimal denet trace: start, two samples (RAM rises to its peak), exit after s seconds."""
+    t0 = _CLOCK[0]
+    _CLOCK[0] += 1000 * s + 10
+    gpu = (lambda mb: {"process_data": [{"gpu_utilization": 50, "memory_usage": int(mb * 1024 ** 2)}]}) if gpu_mb else None
+    lines = [{"kind": "metadata", "t0_ms": t0, "pid": 1, "cmd": "python3 x.py"}]
+    for frac, mem in ((0.0, rss_mb / 2), (0.5, rss_mb), (1.0, rss_mb / 2)):
+        smp = {"kind": "sample", "ts_ms": t0 + 1000 * s * frac, "cpu_usage": 100.0, "mem_rss_kb": int(mem * 1024),
+               "thread_count": 1}
+        if gpu_mb:
+            smp["gpu"] = gpu(gpu_mb * (0.5 + frac / 2))
+        lines.append(smp)
+    lines.append({"kind": "exit", "ts_ms": t0 + 1000 * s})
+    (d / "denet.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
 
 
 def _tsv(path, index, col_values, index_name):

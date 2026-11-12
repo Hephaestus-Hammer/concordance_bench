@@ -54,10 +54,19 @@ Outputs (phase2_<name>.tsv):
   pipelines                 named pipeline x dataset x size x res_key: accuracy, stability,
                             reproducibility, cost, log10 cost against the fastest
   pipelines_runs            the named pipelines' runs per res_key (accuracy distributions)
+  celltypes                 per cell type (reference label): its best-match Jaccard with the
+                            clusters, median over seeds, per Clustering module and named
+                            pipeline, dataset, size and res_key
+  traces                    memory over time (RAM and GPU, GB) of one representative job per
+                            module (the median wall time) at each dataset's largest size
   obs                       every individual observation behind the medians, for box plots:
                             tab, metric, group (module, pipeline or "A vs B"), dataset,
                             subsample, cells, res_key ("*" where the resolution does not
                             matter), value, cold_start
+partitions are compared two ways: ARI, and the symmetric best-match Jaccard (each cluster's
+Jaccard index with its best match in the other partition, mean over clusters, both directions);
+against the labels also homogeneity and completeness, with the number of clusters alongside, and
+modularity on the exact kNN graph at the run's own resolution (how well Leiden optimised).
 memory: a job's peak RAM (denet's peak RSS of the process tree) plus its peak GPU memory, in GB;
 an answer's peak is the largest of its jobs' (the stages run one after another).
 """
@@ -149,7 +158,8 @@ def clustering_table(df):
 # ---- accuracy and bounds ------------------------------------------------------------------
 
 def oracle_bounds(embedding, labels, folds=5, seed=0):
-    """(ARI of cross-validated logistic regression, of 15-NN) predicting labels from an embedding."""
+    """(ARI of cross-validated logistic regression, of 15-NN, Jaccard of each) predicting labels
+    from an embedding."""
     from sklearn.linear_model import LogisticRegression
     from sklearn.model_selection import StratifiedKFold, cross_val_predict
     from sklearn.neighbors import KNeighborsClassifier
@@ -159,20 +169,26 @@ def oracle_bounds(embedding, labels, folds=5, seed=0):
     y = np.asarray(labels)
     k = int(min(folds, pd.Series(y).value_counts().min()))  # rare classes: fewer folds
     if k < 2:
-        return np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan
     cv = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
     out = []
     for clf in (make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000)),
                 KNeighborsClassifier(n_neighbors=15)):
         pred = cross_val_predict(clf, embedding, y, cv=cv)
-        out.append(cc.ari(cc.codes(pd.Series(y)), cc.codes(pd.Series(pred))))
-    return tuple(out)
+        yc, pc = cc.codes(pd.Series(y)), cc.codes(pd.Series(pred))
+        out.append((cc.ari(yc, pc), cc.jaccard(yc, pc)))
+    return out[0][0], out[1][0], out[0][1], out[1][1]
 
 
-def accuracy(df, runs):
-    """Adds ari_truth and clusters to runs; returns (runs, bounds)."""
+def accuracy(df, runs, celltypes=None):
+    """Adds ari_truth, jaccard_truth, homogeneity, completeness and clusters (their number) to
+    runs; returns (runs, bounds). `celltypes`, a list, gets one row per run and label: the
+    label's best-match Jaccard with the run's clusters (how well that cell type is recovered)."""
+    from sklearn.metrics import homogeneity_completeness_v_measure
+
     runs = runs.copy()
-    runs["ari_truth"], runs["clusters"] = np.nan, np.nan
+    for c in ("ari_truth", "jaccard_truth", "homogeneity", "completeness", "clusters"):
+        runs[c] = np.nan
     bounds = []
     truth_rows = df[df["output"] == "rawdata_clusters_truth"]
     emb_rows = df[df["output"] == "embedding_tsv"]
@@ -184,24 +200,54 @@ def accuracy(df, runs):
             continue
         truth = cc.read_truth(t["path"].iloc[0])["truths"]
         order, tc = truth.index, cc.codes(truth)
+        names, sizes = pd.factorize(truth.to_numpy())[1], np.bincount(tc)
         for i in idx:
             lab = cc.read_clusters(runs.at[i, "path"]).reindex(order)
             if lab.isna().any():
                 raise ValueError(f"cells missing from {runs.at[i, 'path']} relative to the truth file")
             codes = cc.codes(lab)
             runs.at[i, "ari_truth"] = cc.ari(tc, codes)
+            jt, jc = cc.jaccard_best_match(tc, codes)
+            runs.at[i, "jaccard_truth"] = float((jt.mean() + jc.mean()) / 2)
+            h, c, _ = homogeneity_completeness_v_measure(tc, codes)
+            runs.at[i, "homogeneity"], runs.at[i, "completeness"] = h, c
             runs.at[i, "clusters"] = codes.max() + 1
+            if celltypes is not None:
+                celltypes.extend({"row": i, "label": names[li], "label_cells": int(sizes[li]), "jaccard": float(jt[li])}
+                                 for li in range(len(names)))
         if any(b["dataset"] == dataset and b["subsample"] == subsample for b in bounds):
             continue  # one bound per dataset and size, from the first folder
         e = emb_rows[[n[0].module == dataset and n[1].module == subsample and n[-1].module == BASELINE["pca"]
                       for n in emb_rows["nodes"]]]
         e = e if len(e) else emb_rows[[n[0].module == dataset and n[1].module == subsample for n in emb_rows["nodes"]]]
-        lr, knn = (oracle_bounds(cc.read_embedding(e["path"].iloc[0]).reindex(order).to_numpy(), truth.to_numpy())
-                   if len(e) else (np.nan, np.nan))
+        lr, knn, lr_j, knn_j = (oracle_bounds(cc.read_embedding(e["path"].iloc[0]).reindex(order).to_numpy(),
+                                              truth.to_numpy()) if len(e) else (np.nan,) * 4)
+        best = lambda v: float(np.nanmax(v)) if np.isfinite(v).any() else np.nan  # noqa: E731
         bounds.append({"dataset": dataset, "subsample": subsample, "cells": len(truth),
                        "labels": truth.nunique(), "chance": 0.0, "oracle_logreg": lr, "oracle_knn": knn,
-                       "oracle": float(np.nanmax([lr, knn])) if np.isfinite([lr, knn]).any() else np.nan})
+                       "oracle": best([lr, knn]), "oracle_jaccard": best([lr_j, knn_j])})
     return runs, pd.DataFrame(bounds)
+
+
+def add_modularity(df, runs):
+    """Modularity of every clustering on the exact kNN graph of its folder (the baseline
+    kNN's connectivities on the baseline PCA), at the run's own resolution."""
+    runs = runs.copy()
+    runs["modularity"] = np.nan
+    nb = df[df["output"] == "neighbors_h5"]
+    for (d, s, run), idx in runs.groupby(["dataset", "subsample", "run"]).groups.items():
+        e = nb[[len(n) >= 4 and n[0].module == d and n[1].module == s and n[2].module == BASELINE["pca"]
+                and n[3].module == BASELINE["knn"] and _run_tag(n) == run for n in nb["nodes"]]]
+        if not len(e):
+            continue
+        graph, cells = cc.read_connectivities(e["path"].iloc[0])
+        graph = ((graph + graph.T) / 2).tocsr()
+        for i in idx:
+            lab = cc.read_clusters(runs.at[i, "path"]).reindex(cells)
+            if lab.isna().any():
+                continue
+            runs.at[i, "modularity"] = cc.modularity(graph, cc.codes(lab), runs.at[i, "resolution"])
+    return runs
 
 
 def oracle_resolution(g):
@@ -221,7 +267,7 @@ def _summarise(values):
 
 
 def pair_obs(runs, key, same_folder):
-    """Every pairwise ARI within groups sharing `key`: seeds differ within one folder
+    """Every pairwise ARI and Jaccard within groups sharing `key`: seeds differ within one folder
     (stability), or identical seeds across folders (reproducibility). One row per pair."""
     seeds = ["pca_seed", "knn_seed", "cluster_seed"]
     out = []
@@ -236,12 +282,14 @@ def pair_obs(runs, key, same_folder):
                 continue
             if not same_folder and (a["run"] == b["run"] or not same_seeds):
                 continue
-            out.append({**dict(zip(key, k)), "value": cc.ari(lab[a["path"]], lab[b["path"]])})
-    return pd.DataFrame(out, columns=[*key, "value"])
+            out.append({**dict(zip(key, k)), "value": cc.ari(lab[a["path"]], lab[b["path"]]),
+                        "jaccard": cc.jaccard(lab[a["path"]], lab[b["path"]])})
+    return pd.DataFrame(out, columns=[*key, "value", "jaccard"])
 
 
-def summarise_pairs(obs, key):
-    rows = [{**dict(zip(key, k)), **_summarise(g["value"].to_numpy())} for k, g in obs.groupby(key, dropna=False)]
+def summarise_pairs(obs, key, col="value"):
+    """PAIR_COLS of `col` (value = ARI, jaccard) per group."""
+    rows = [{**dict(zip(key, k)), **_summarise(g[col].to_numpy())} for k, g in obs.groupby(key, dropna=False)]
     return pd.DataFrame(rows, columns=[*key, *PAIR_COLS])
 
 
@@ -411,7 +459,7 @@ def cluster_slice(runs):
 
 
 def cluster_concordance(runs):
-    """Leiden implementations on the Clustering slice: ARI between them at equal resolutions,
+    """Leiden implementations on the Clustering slice: ARI and Jaccard between them at equal resolutions,
     against each one's seed floor; per resolution, and at res_key "oracle" the rows at the
     baseline Leiden's oracle resolution."""
     sl = cluster_slice(runs)
@@ -428,7 +476,13 @@ def cluster_concordance(runs):
     def sim(x, y):
         return cc.ari(cc.codes(x), cc.codes(y.reindex(x.index)))
 
-    c = stage_concordance("cluster", t, items, sim, by=("dataset", "subsample", "resolution"))
+    def sim_j(x, y):
+        return cc.jaccard(cc.codes(x), cc.codes(y.reindex(x.index)))
+
+    by = ("dataset", "subsample", "resolution")
+    c = pd.concat([stage_concordance("cluster", t, items, sim, by=by).assign(measure="ari"),
+                   stage_concordance("cluster", t, items, sim_j, by=by).assign(measure="jaccard")],
+                  ignore_index=True)
     if not len(c):
         return c
     c["res_key"] = c["resolution"].map(res_key)
@@ -471,9 +525,11 @@ def job_memory_gb(rt):
 
 def add_cost(t, rt, cold):
     wall = dict(zip(rt["dir"], rt["s"])) if len(rt) else {}
+    cpu = dict(zip(rt["dir"], rt["cpu_time"])) if len(rt) else {}
     mem = job_memory_gb(rt)
     t = t.copy()
     t["wall_s"] = [wall.get(d, np.nan) for d in t["dir"]]
+    t["cpu_s"] = [cpu.get(d, np.nan) for d in t["dir"]]
     t["mem_gb"] = [mem.get(d, np.nan) for d in t["dir"]]
     t["cold_start"] = [d in cold for d in t["dir"]]
     return t
@@ -493,6 +549,7 @@ def answers(runs, rt, cold):
     """One row per answer and resolution (scope "single": PCA + kNN + one Leiden run) and per
     answer for the whole sweep (scope "sweep": PCA + kNN + Leiden at every resolution)."""
     wall = dict(zip(rt["dir"], rt["s"])) if len(rt) else {}
+    cpu = dict(zip(rt["dir"], rt["cpu_time"])) if len(rt) else {}
     mem = job_memory_gb(rt)
     key = ["dataset", "subsample", "pipeline", "pca_seed", "knn_seed", "cluster_seed", "run"]
     out = []
@@ -503,6 +560,7 @@ def answers(runs, rt, cold):
         return {**dict(zip(key, k)), "scope": scope, "resolution": res, "resolutions": len(cdirs),
                 "pca_s": w[0], "knn_s": w[1], "cluster_s": float(np.sum(w[2:])),
                 "wall_s": float(np.sum(w)) if np.isfinite(w).all() else np.nan,
+                "cpu_s": float(np.nansum([cpu.get(d, np.nan) for d in dirs])),
                 "mem_gb": float(np.nanmax(m)) if np.isfinite(m := [mem.get(d, np.nan) for d in dirs]).any() else np.nan,
                 "cold_start": any(d in cold for d in dirs)}
 
@@ -515,23 +573,46 @@ def answers(runs, rt, cold):
 
 # ---- summaries -------------------------------------------------------------------------
 
-def _pick(t, **where):
+def _pick(t, col="median", **where):
     if not len(t):
         return np.nan
     m = t
     for k, v in where.items():
         m = m[m[k] == v]
-    return float(m["median"].iloc[0]) if len(m) else np.nan
+    return float(m[col].iloc[0]) if len(m) else np.nan
+
+
+RUN_METRICS = ["n_clusters", "homogeneity", "completeness", "modularity"]
+
+
+def _run_metrics(at):
+    """Medians over runs of the label-free and label-based per-run metrics."""
+    return {"accuracy_jaccard": float(at["jaccard_truth"].median()) if len(at) else np.nan,
+            "n_clusters": float(at["clusters"].median()) if len(at) else np.nan,
+            **{m: float(at[m].median()) if len(at) and m in at else np.nan for m in RUN_METRICS[1:]}}
+
+
+def _run_obs(ob, at, *args):
+    """Per-run observations: Jaccard against the labels, number of clusters, homogeneity,
+    completeness, modularity."""
+    ob(*args[:1], "accuracy_jaccard", *args[1:], at["jaccard_truth"])
+    ob(*args[:1], "n_clusters", *args[1:], at["clusters"])
+    for m in RUN_METRICS[1:]:
+        if m in at:
+            ob(*args[:1], m, *args[1:], at[m])
 
 
 def _share(ari, oracle):
     return (ari - 0.0) / oracle if np.isfinite(oracle) and oracle > 0 else np.nan
 
 
-def stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs=None):
+def stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs=None, celltypes=None,
+                   ct_rows=None):
     """Stage x module x dataset x size x res_key: the stage tabs' numbers. `obs`, a list, gets
-    the individual observations behind them."""
+    the individual observations behind them; `ct_rows`, a list, the Clustering groups for the
+    per-cell-type table (with `celltypes`, the per-run per-label rows from accuracy())."""
     obs = [] if obs is None else obs
+    ct_rows = [] if ct_rows is None else ct_rows
 
     def ob(tab, metric, group, d, s, cells, key, values, cold_flags=None):
         cold_flags = [False] * len(values) if cold_flags is None else list(cold_flags)
@@ -550,7 +631,8 @@ def stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs=N
         for c in other_seeds[stage]:
             sl = sl[sl[c].isin(["0", ""])]
         so, ro = pair_obs(sl, KEY, True), pair_obs(sl, KEY, False)
-        sliced[stage] = (sl, summarise_pairs(so, KEY), summarise_pairs(ro, KEY), so, ro)
+        sliced[stage] = (sl, summarise_pairs(so, KEY), summarise_pairs(ro, KEY), so, ro,
+                         summarise_pairs(so, KEY, "jaccard"), summarise_pairs(ro, KEY, "jaccard"))
     grid = sorted(runs["resolution"].dropna().unique())
     rows = []
     for (d, s), g in runs.groupby(["dataset", "subsample"]):
@@ -558,13 +640,13 @@ def stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs=N
         base = g[g["pipeline"] == BASELINE_PIPELINE]
         res_base = oracle_resolution(base) if len(base) else np.nan
         for stage in STAGES:
-            sl_all, stab, repro, so, ro = sliced[stage]
+            sl_all, stab, repro, so, ro, stab_j, repro_j = sliced[stage]
             cells = b.at[(d, s), "cells"] if (d, s) in b.index else np.nan
             sl = sl_all[(sl_all["dataset"] == d) & (sl_all["subsample"] == s)]
             for module, gm in sl.groupby(stage):
                 pipeline = gm["pipeline"].iloc[0]
                 own = {"fidelity": np.nan, "stage_stability": np.nan, "stage_reproducibility": np.nan,
-                       "cost_s": np.nan, "mem_gb": np.nan}
+                       "cost_s": np.nan, "cpu_s": np.nan, "mem_gb": np.nan}
                 if stage in ("pca", "knn"):
                     st, pairs = (pca, pca_pairs) if stage == "pca" else (knn, knn_pairs)
                     r = st[(st["dataset"] == d) & (st["subsample"] == s) & (st["module"] == module)] if len(st) else st
@@ -573,11 +655,13 @@ def stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs=N
                            "stage_stability": float(p[p["kind"] == "stability"]["value"].median()) if len(p) else np.nan,
                            "stage_reproducibility": float(p[p["kind"] == "reproducibility"]["value"].median()) if len(p) else np.nan,
                            "cost_s": warm_median(r) if len(r) else np.nan,
+                           "cpu_s": warm_median(r, "cpu_s") if len(r) else np.nan,
                            "mem_gb": warm_median(r, "mem_gb") if len(r) else np.nan}
                     if len(r):
                         ob(stage, "fidelity", module, d, s, cells, "*", r["fidelity"])
                         w = warm(r)
                         ob(stage, "cost_s", module, d, s, cells, "*", w["wall_s"], w["cold_start"])
+                        ob(stage, "cpu_s", module, d, s, cells, "*", w["cpu_s"], w["cold_start"])
                         ob(stage, "mem_gb", module, d, s, cells, "*", w["mem_gb"], w["cold_start"])
                     if len(p):
                         ob(stage, "stage_stability", module, d, s, cells, "*", p.loc[p["kind"] == "stability", "value"])
@@ -593,25 +677,90 @@ def stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs=N
                            "accuracy_ari": float(at["ari_truth"].median()) if len(at) else np.nan,
                            "accuracy_share": _share(float(at["ari_truth"].median()), oracle) if len(at) else np.nan,
                            "downstream_stability": _pick(stab, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
+                           "downstream_stability_min": _pick(stab, "min", dataset=d, subsample=s, pipeline=pipeline, resolution=res),
                            "downstream_reproducibility": _pick(repro, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
-                           **own}
+                           "downstream_stability_jaccard": _pick(stab_j, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
+                           "downstream_reproducibility_jaccard": _pick(repro_j, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
+                           **_run_metrics(at), **own}
                     ds = so[(so["dataset"] == d) & (so["subsample"] == s) & (so["pipeline"] == pipeline) & (so["resolution"] == res)]
                     dr = ro[(ro["dataset"] == d) & (ro["subsample"] == s) & (ro["pipeline"] == pipeline) & (ro["resolution"] == res)]
                     ob(stage, "accuracy_share", module, d, s, cells, key, [_share(x, oracle) for x in at["ari_truth"]])
                     ob(stage, "downstream_stability", module, d, s, cells, key, ds["value"])
                     ob(stage, "downstream_reproducibility", module, d, s, cells, key, dr["value"])
+                    ob(stage, "downstream_stability_jaccard", module, d, s, cells, key, ds["jaccard"])
+                    ob(stage, "downstream_reproducibility_jaccard", module, d, s, cells, key, dr["jaccard"])
+                    _run_obs(ob, at, stage, module, d, s, cells, key)
+                    if celltypes is not None and len(celltypes) and stage == "cluster":
+                        ct_rows.append((stage, module, d, s, cells, key, at.index))
                     if stage == "cluster":
                         jobs = add_cost(at.rename(columns={"cluster_dir": "dir"})[["dir"]], rt, cold)
                         row.update({"stage_stability": row["downstream_stability"],
                                     "stage_reproducibility": row["downstream_reproducibility"],
                                     "cost_s": warm_median(jobs) if len(jobs) else np.nan,  # one Leiden run
+                                    "cpu_s": warm_median(jobs, "cpu_s") if len(jobs) else np.nan,
                                     "mem_gb": warm_median(jobs, "mem_gb") if len(jobs) else np.nan})
                         if len(jobs):
                             w = warm(jobs)
                             ob(stage, "cost_s", module, d, s, cells, key, w["wall_s"], w["cold_start"])
+                            ob(stage, "cpu_s", module, d, s, cells, key, w["cpu_s"], w["cold_start"])
                             ob(stage, "mem_gb", module, d, s, cells, key, w["mem_gb"], w["cold_start"])
                     rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _pick_j(po, d, s, pipeline, res):
+    """Median Jaccard over the pairs of one pipeline, dataset, size and resolution."""
+    if po is None or not len(po):
+        return np.nan
+    v = po[(po["dataset"] == d) & (po["subsample"] == s) & (po["pipeline"] == pipeline) & (po["resolution"] == res)]
+    return float(v["jaccard"].median()) if len(v) else np.nan
+
+
+def celltype_table(runs, celltypes, ct_rows):
+    """Per cell type: its best-match Jaccard with the clusters, median over the group's runs."""
+    if not celltypes or not ct_rows:
+        return pd.DataFrame()
+    ct = pd.DataFrame(celltypes).set_index("row")
+    out = []
+    for tab, group, d, s, cells, key, idx in ct_rows:
+        g = ct[ct.index.isin(idx)]
+        for (label, size), x in g.groupby(["label", "label_cells"]):
+            out.append({"tab": tab, "group": group, "dataset": d, "subsample": s, "cells": cells, "res_key": key,
+                        "label": label, "label_cells": size, "jaccard": float(x["jaccard"].median()), "runs": len(x)})
+    return pd.DataFrame(out)
+
+
+def traces(rt, runs, bounds):
+    """Memory over time of one representative job per stage and module (the median wall time)
+    at each dataset's largest size: RAM (process tree) and GPU memory, GB."""
+    if not len(rt) or not len(runs):
+        return pd.DataFrame()
+    from obkit import prof
+    where = {}
+    for _, r in runs.iterrows():
+        for stage in STAGES:
+            where[r[f"{stage}_dir"]] = (r["dataset"], r["subsample"])
+    cells = {(r["dataset"], r["subsample"]): r["cells"] for _, r in bounds.iterrows()}
+    t = rt[rt["dir"].isin(where) & rt["stage"].isin(STAGES)].dropna(subset=["s"]).copy()
+    if not len(t):
+        return pd.DataFrame()
+    t["dataset"] = [where[x][0] for x in t["dir"]]
+    t["subsample"] = [where[x][1] for x in t["dir"]]
+    t["cells"] = [cells.get(where[x], np.nan) for x in t["dir"]]
+    out = []
+    for (d, stage, module), g in t.groupby(["dataset", "stage", "module"]):
+        g = g[g["cells"] == g["cells"].max()]
+        r = g.iloc[int(np.argmin((g["s"] - g["s"].median()).abs().to_numpy()))]
+        path = Path(r["dir"]) / "denet.jsonl"
+        tr = prof.load_denet(path) if path.exists() else None
+        if not tr or not tr["samples"]:
+            continue
+        for smp in tr["samples"]:
+            gb = smp.get("gpu_mem_bytes")
+            out.append({"dataset": d, "subsample": r["subsample"], "cells": r["cells"], "stage": stage,
+                        "module": module, "t_s": (smp["ts_ms"] - tr["t0_ms"]) / 1000.0,
+                        "ram_gb": smp["mem_rss_kb"] / 1024 ** 2, "gpu_gb": gb / 1024 ** 3 if gb is not None else np.nan})
+    return pd.DataFrame(out)
 
 
 def named_pipeline_runs(runs):
@@ -630,7 +779,7 @@ def named_pipeline_runs(runs):
     return t
 
 
-def pipelines_summary(named, bounds, stab, repro, ans, stab_obs=None, repro_obs=None, obs=None):
+def pipelines_summary(named, bounds, stab, repro, ans, stab_obs=None, repro_obs=None, obs=None, ct_rows=None):
     """Named pipeline x dataset x size x res_key. At a fixed resolution the cost of an answer is
     PCA + kNN + one Leiden run; at "oracle" the whole sweep, since choosing needs every run."""
     b = bounds.set_index(["dataset", "subsample"]) if len(bounds) else pd.DataFrame()
@@ -656,10 +805,19 @@ def pipelines_summary(named, bounds, stab, repro, ans, stab_obs=None, repro_obs=
                 for metric, po in (("stability", stab_obs), ("reproducibility", repro_obs)):
                     if po is not None and len(po):
                         v = po[(po["dataset"] == d) & (po["subsample"] == s) & (po["pipeline"] == pipeline)
-                               & (po["resolution"] == res)]["value"]
-                        obs.extend({**base, "metric": metric, "value": float(x), "cold_start": False} for x in v)
+                               & (po["resolution"] == res)]
+                        obs.extend({**base, "metric": metric, "value": float(x), "cold_start": False} for x in v["value"])
+                        obs.extend({**base, "metric": f"{metric}_jaccard", "value": float(x), "cold_start": False}
+                                   for x in v["jaccard"])
+                for metric, col in (("accuracy_jaccard", "jaccard_truth"), ("n_clusters", "clusters"),
+                                    *((m, m) for m in RUN_METRICS[1:])):
+                    if col in at:
+                        obs.extend({**base, "metric": metric, "value": float(x), "cold_start": False}
+                                   for x in at[col] if np.isfinite(x))
+                if ct_rows is not None:
+                    ct_rows.append(("pipeline", name, d, s, cells, key, at.index))
                 w = warm(c) if len(c) else c
-                for metric, col in (("cost_s", "wall_s"), ("mem_gb", "mem_gb")):
+                for metric, col in (("cost_s", "wall_s"), ("cpu_s", "cpu_s"), ("mem_gb", "mem_gb")):
                     obs.extend({**base, "metric": metric, "value": float(x), "cold_start": bool(cs)}
                                for x, cs in zip(w[col], w["cold_start"]) if np.isfinite(x))
             rows.append({"dataset": d, "subsample": s,
@@ -670,8 +828,13 @@ def pipelines_summary(named, bounds, stab, repro, ans, stab_obs=None, repro_obs=
                          "accuracy_q90": float(at["ari_truth"].quantile(0.9)),
                          "accuracy_share": _share(float(at["ari_truth"].median()), oracle),
                          "stability": _pick(stab, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
+                         "stability_min": _pick(stab, "min", dataset=d, subsample=s, pipeline=pipeline, resolution=res),
                          "reproducibility": _pick(repro, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
+                         "stability_jaccard": _pick_j(stab_obs, d, s, pipeline, res),
+                         "reproducibility_jaccard": _pick_j(repro_obs, d, s, pipeline, res),
+                         **_run_metrics(at),
                          "cost_s": warm_median(c) if len(c) else np.nan,
+                         "cpu_s": warm_median(c, "cpu_s") if len(c) else np.nan,
                          "mem_gb": warm_median(c, "mem_gb") if len(c) else np.nan,
                          "cost_cold_answers": int(c["cold_start"].sum()) if len(c) else 0})
             at_res.append(at.assign(res_key=key, accuracy_share=[_share(x, oracle) for x in at["ari_truth"]]))
@@ -694,8 +857,9 @@ def concordance_obs(conc, bounds):
         key = r["res_key"] if "res_key" in r and isinstance(r["res_key"], str) else "*"
         base = {"tab": r["stage"], "dataset": r["dataset"], "subsample": r["subsample"],
                 "cells": cells.get((r["dataset"], r["subsample"]), np.nan), "res_key": key, "cold_start": False}
-        out += [{**base, "metric": "between", "group": f'{r["A"]} vs {r["B"]}', "value": v} for v in r["_between"]]
-        out += [{**base, "metric": "within", "group": f'{r["A"]} vs {r["B"]}|{r[side]}', "value": v}
+        sfx = "_jaccard" if r.get("measure") == "jaccard" else ""
+        out += [{**base, "metric": f"between{sfx}", "group": f'{r["A"]} vs {r["B"]}', "value": v} for v in r["_between"]]
+        out += [{**base, "metric": f"within{sfx}", "group": f'{r["A"]} vs {r["B"]}|{r[side]}', "value": v}
                 for side, col in (("A", "_within A"), ("B", "_within B")) for v in r[col]]
     return pd.DataFrame(out)
 
@@ -712,7 +876,9 @@ def main():
     runs = clustering_table(df)
     if not len(runs):
         raise SystemExit("no Phase 2 clusterings found (data > input > pca > knn > cluster)")
-    runs, bounds = accuracy(df, runs)
+    celltypes = []
+    runs, bounds = accuracy(df, runs, celltypes)
+    runs = add_modularity(df, runs)
     stab_obs, repro_obs = pair_obs(runs, KEY, True), pair_obs(runs, KEY, False)
     stab, repro = summarise_pairs(stab_obs, KEY), summarise_pairs(repro_obs, KEY)
     rt = rs.runtimes(df)[0]
@@ -724,10 +890,11 @@ def main():
     stage_conc = pd.concat([pca_concordance(pca), knn_concordance(knn), cluster_concordance(runs)],
                            ignore_index=True)
     ans = answers(runs, rt, cold)
-    obs = []
-    stages = stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs)
+    obs, ct_rows = [], []
+    stages = stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs, celltypes, ct_rows)
     named = named_pipeline_runs(runs)
-    pipes, pipe_runs = pipelines_summary(named, bounds, stab, repro, ans, stab_obs, repro_obs, obs)
+    pipes, pipe_runs = pipelines_summary(named, bounds, stab, repro, ans, stab_obs, repro_obs, obs, ct_rows)
+    cts = celltype_table(runs, celltypes, ct_rows)
     obs = pd.concat([pd.DataFrame(obs), concordance_obs(stage_conc, bounds)], ignore_index=True)
     stage_conc = stage_conc.drop(columns=[c for c in stage_conc.columns if c.startswith("_")])
 
@@ -737,7 +904,7 @@ def main():
     tables = {"bounds": bounds, "runs": runs, "jobs": rt, "pca": pca, "pca_pairs": pca_pairs, "knn": knn,
               "knn_pairs": knn_pairs, "stability": stab, "reproducibility": repro, "stages": stages,
               "answers": ans, "pipelines": pipes, "pipelines_runs": pipe_runs,
-              "stage_concordance": stage_conc, "obs": obs}
+              "stage_concordance": stage_conc, "obs": obs, "celltypes": cts, "traces": traces(rt, runs, bounds)}
     for name, t in tables.items():
         t.drop(columns=[c for c in drop if c in t.columns and name != "jobs"]).to_csv(
             out / f"phase2_{name}.tsv", sep="\t", index=False)

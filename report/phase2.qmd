@@ -67,10 +67,13 @@ def tsv(name):
 
 bounds, runs, stages, obs = tsv("bounds"), tsv("runs"), tsv("stages"), tsv("obs")
 pipes, stage_conc = tsv("pipelines"), tsv("stage_concordance")
+celltypes, traces = tsv("celltypes"), tsv("traces")
 if not len(stages) or "res_key" not in stages.columns or not len(obs):
     raise RuntimeError(f"no per-resolution phase2_stages.tsv / phase2_obs.tsv in {R}: run analysis/phase2.py first")
 
 ORACLE, ANY = "oracle", "*"
+MEASURES = ["ari", "jaccard"]  # the partition-agreement toggle
+MNAME = {"ari": "ARI", "jaccard": "Jaccard"}
 RES_KEYS = [ORACLE] + sorted((k for k in stages["res_key"].unique() if k != ORACLE), key=float)
 datasets = sorted(stages["dataset"].unique())
 PIPE_ORDER = ["baseline", "scanpy-defaults", "tuned-cpu", "all-gpu", "hybrid"]
@@ -106,7 +109,7 @@ def table(df, digits=3, title="Table of medians"):
 def show(fig):
     """A figure as an embedded PNG (figures.py selects the Agg backend: nothing to display)."""
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=100)
+    fig.savefig(buf, format="png", dpi=85)
     plt.close(fig)
     raw(f'<img src="data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}" style="max-width:100%">')
 
@@ -167,16 +170,77 @@ def boxes(o, ylabel, colours, order=None, logy=False, note=None):
         print(f"\n{note}\n")
 
 
+def celltype_map(tab, k, groups_order):
+    """Per cell type, each group's best-match Jaccard (median over seeds) at each dataset's
+    largest size: which cell types each implementation recovers and which it loses."""
+    c = celltypes[(celltypes["tab"] == tab) & (celltypes["res_key"] == k)] if len(celltypes) else celltypes
+    if not len(c):
+        return
+    for d in datasets:
+        x = c[c["dataset"] == d]
+        if not len(x):
+            continue
+        x = x[x["cells"] == x["cells"].max()]
+        m = x.pivot_table(index=["label", "label_cells"], columns="group", values="jaccard")
+        m = m.sort_index(level="label_cells", ascending=False)
+        m = m[[g for g in groups_order if g in m.columns]]
+        fig, ax = plt.subplots(figsize=(3.0 + 1.0 * m.shape[1], 1.4 + 0.3 * m.shape[0]), constrained_layout=True)
+        im = ax.imshow(m.to_numpy(), aspect="auto", cmap="Blues", vmin=0, vmax=1)
+        ax.set_xticks(range(m.shape[1]), m.columns, rotation=30, ha="right", fontsize=7)
+        ax.set_yticks(range(m.shape[0]), [f"{lab} ({n:,})" for lab, n in m.index], fontsize=7)
+        ax.grid(False)
+        if m.size <= 400:
+            for (i, j), v in np.ndenumerate(m.to_numpy()):
+                if np.isfinite(v):
+                    ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=6,
+                            color="white" if v > 0.6 else "#222")
+        ax.set_title(f"{d} · {x['cells'].iloc[0] / 1000:g}k cells · per cell type (cells)", loc="left", fontsize=8)
+        fig.colorbar(im, ax=ax, shrink=0.6, label="Jaccard with best cluster")
+        show(fig)
+
+
+def trace_plot(stage):
+    """RAM (solid) and GPU memory (dashed) over the run of one representative job per module."""
+    t = traces[traces["stage"] == stage] if len(traces) else traces
+    if not len(t):
+        print("\n_No denet traces in these results._\n")
+        return
+    fig, axes = plt.subplots(1, len(datasets), figsize=(max(6.5, 4.2 * len(datasets)), 3.0), sharey=True,
+                             constrained_layout=True, squeeze=False)
+    seen = {}
+    for ax, d in zip(axes[0], datasets):
+        x = t[t["dataset"] == d]
+        for mod, g in x.groupby("module"):
+            g = g.sort_values("t_s")
+            seen[mod] = ax.plot(g["t_s"], g["ram_gb"], color=MOD_COLOUR.get(mod, "#52514e"), lw=1.4)[0]
+            if g["gpu_gb"].notna().any():
+                ax.plot(g["t_s"], g["gpu_gb"], color=MOD_COLOUR.get(mod, "#52514e"), lw=1.2, ls="--")
+        if len(x):
+            ax.set_title(f"{d} · {x['cells'].iloc[0] / 1000:g}k cells", loc="left")
+        ax.set_xlabel("time since the job started (s)")
+    axes[0][0].set_ylabel("memory (GB)")
+    fig.legend(seen.values(), seen.keys(), loc="outside right center", frameon=False, fontsize=7)
+    show(fig)
+    print("\n_Solid: RAM of the job's process tree; dashed: GPU memory. One job per module: the one with "
+          "the median wall time at each dataset's largest size._\n")
+
+
 def ob(tab, metric, key=ANY):
     return obs[(obs["tab"] == tab) & (obs["metric"] == metric) & (obs["res_key"] == key)]
 
 
-def per_res(fn):
-    """fn(res_key) once per resolution, each in a pane the resolution slider shows or hides."""
+def per_res(fn, measured=False):
+    """fn(res_key) once per resolution (fn(res_key, measure) per resolution and partition
+    measure if measured), each in a pane the resolution slider and the measure toggle show or hide."""
     for k in RES_KEYS:
-        print(f'\n::: {{.res-pane data-res="{k}"}}\n')
-        fn(k)
-        print("\n:::\n")
+        for m in (MEASURES if measured else [ANY]):
+            print(f'\n::: {{.res-pane data-res="{k}" data-measure="{m}"}}\n')
+            fn(k, m) if measured else fn(k)
+            print("\n:::\n")
+
+
+def sfx(m):
+    return "_jaccard" if m == "jaccard" else ""
 
 
 def res_text(k, own="each at its own oracle resolution"):
@@ -319,6 +383,58 @@ metric("tradeoff", "Trade-off score", "Full pipeline › Trade-off and threshold
        "higher is better")
 
 
+metric("jaccard", "Best-match Jaccard", "every Stability, Concordance and Accuracy view under the Jaccard toggle",
+       "For every cluster of one partition, the overlap with its best-matching cluster in the other, as the "
+       "Jaccard index (cells in both ÷ cells in either); averaged over clusters, every cluster counting "
+       "the same however small, in both directions. Unlike ARI, which counts pairs of cells and so is "
+       "dominated by the largest clusters, a rare cell type that is lost costs as much as a common one. "
+       "Splitting a cluster in two halves gives each half 0.5. Always read with the number of clusters.",
+       r"J(a,b) = \tfrac{1}{2}\left[\frac{1}{|a|}\sum_{A \in a} \max_{B \in b} \frac{|A \cap B|}{|A \cup B|} + \frac{1}{|b|}\sum_{B \in b} \max_{A \in a} \frac{|A \cap B|}{|A \cup B|}\right]",
+       [("a, b", "two partitions of the same cells (two runs, or a run and the reference labels)"),
+        ("A, B", "a cluster (a set of cells) of a and of b"), ("|a|", "the number of clusters of a")],
+       "0 to 1; 1 = identical; higher is better")
+metric("n_clusters", "Number of clusters", "next to every Jaccard view, Accuracy tables",
+       "How many clusters the run found. Agreement measures depend on it: coarse partitions agree with "
+       "each other more easily, and a partition finer or coarser than the labels cannot match them well.",
+       r"K = |\{\text{clusters}\}|", [], "compare with the number of reference labels (Overview)")
+metric("celltype", "Per-cell-type recovery", "Clustering › Accuracy and Full pipeline, Jaccard toggle",
+       "For every reference cell type, the Jaccard index with the cluster that matches it best, median "
+       "over seeds: which cell types an implementation finds and which it splits or merges away.",
+       r"J(L) = \max_{B} \frac{|L \cap B|}{|L \cup B|}",
+       [("L", "the cells of one reference label"), ("B", "a cluster of the run")], "0 to 1; higher is better")
+metric("homcom", "Homogeneity and completeness", "every Accuracy view",
+       "Accuracy split into its two ways of failing. Homogeneity: is each cluster made of one cell type? "
+       "Completeness: is each cell type in one cluster? Clusters that are too fine stay homogeneous but "
+       "lose completeness; too coarse, the reverse. Entropy-based (their harmonic mean is the V-measure).",
+       r"h = 1 - \frac{H(L \mid C)}{H(L)}, \qquad c = 1 - \frac{H(C \mid L)}{H(C)}",
+       [("L, C", "the reference labels and the clusters"), ("H(L \\mid C)", "the entropy of the labels within clusters"),
+        ("H(C \\mid L)", "the entropy of the clusters within labels")], "0 to 1; higher is better")
+metric("modularity", "Modularity (optimiser quality)", "Clustering › Accuracy, PCA and kNN downstream, Full pipeline",
+       "The objective every Leiden implementation maximises, evaluated for every result on the same graph "
+       "(the exact kNN graph of its folder) at the run's own resolution. It answers how well an "
+       "implementation optimises what it claims to optimise, and, downstream of an approximate PCA or "
+       "kNN, how much the approximation costs on the true graph. Not a measure of biological accuracy; "
+       "values at different resolutions are not comparable.",
+       r"Q_\gamma = \sum_{C} \left[\frac{w_{\mathrm{in}}(C)}{2m} - \gamma \left(\frac{d(C)}{2m}\right)^2\right]",
+       [("C", "a cluster"), ("w_{\\mathrm{in}}(C)", "the weight of edges inside C (each counted twice)"),
+        ("d(C)", "the summed degree of its cells"), ("2m", "the total degree of the graph"),
+        ("\\gamma", "the resolution the run used")], "higher = a better partition of this graph")
+metric("cpu", "CPU time", "every Cost subtab",
+       "Processor time the job used, all cores together (denet: CPU use integrated over time, 100 % = one "
+       "busy core). What a shared cluster bills for; wall time favours what parallelises, CPU time does not. "
+       "GPU work is not in it.",
+       r"T_{\mathrm{CPU}} = \int_0^{T} \mathrm{cores}(t)\, dt", [("\\mathrm{cores}(t)", "cores busy at time t")],
+       "core-seconds; lower is better")
+metric("trace", "Memory traces", "every Cost subtab",
+       "Memory over the run of one representative job per implementation (the one with the median wall "
+       "time, at each dataset's largest size): the shape behind the peak, such as a spike while loading or "
+       "a GPU allocation held throughout.", r"\mathrm{RAM}(t),\; \mathrm{GPU}(t)", [], "")
+metric("worst", "Worst pair", "the tables of Stability and Full pipeline",
+       "The lowest agreement among all pairs of seeds: how far an unlucky seed can take you. Shown next "
+       "to the median in the tables; the box plots show all pairs.",
+       r"\min_{s \neq t} \mathrm{sim}(\text{run}_s, \text{run}_t)", [], "same scale as the measure")
+
+
 def explain(*keys):
     """The metrics' description, formula and legend, as used in a subtab."""
     for k in keys:
@@ -337,47 +453,66 @@ def explain(*keys):
 ```{python}
 # ---- the four subtabs, one function each, the same for every stage ------------------------
 
+MEASURE_NOTE = {"ari": "Partition agreement: **ARI**.", "jaccard": "Partition agreement: **best-match Jaccard**, with the number of clusters."}
+
+
+def _clusters_box(tab, k):
+    boxes(ob(tab, "n_clusters", k), "number of clusters", PIPE_COLOUR if tab == "pipeline" else MOD_COLOUR,
+          order=PIPE_ORDER if tab == "pipeline" else None,
+          note=f"_Reference labels: {', '.join(f'{d} {n}' for d, n in bounds.groupby('dataset')['labels'].first().items())}._")
+
+
 def stability(stage):
     if stage == "cluster":
-        explain("stability", "ari")
+        explain("stability", "ari", "jaccard", "worst")
 
-        def pane(k):
-            print(f"Leiden at {res_text(k).replace('at ', '')}, on exact PCA and kNN.\n")
-            boxes(ob(stage, "downstream_stability", k), "stability (ARI between seeds)", MOD_COLOUR, note=BOX_NOTE)
-            if len(ob(stage, "downstream_reproducibility", k)):
-                boxes(ob(stage, "downstream_reproducibility", k), "reproducibility (ARI, same seed)", MOD_COLOUR)
-            table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "stage_stability",
-                                       "stage_reproducibility"]))
-        per_res(pane)
+        def pane(k, m):
+            print(f"Leiden at {res_text(k).replace('at ', '')}, on exact PCA and kNN. {MEASURE_NOTE[m]}\n")
+            boxes(ob(stage, "downstream_stability" + sfx(m), k), f"stability ({MNAME[m]} between seeds)", MOD_COLOUR,
+                  note=BOX_NOTE)
+            if len(ob(stage, "downstream_reproducibility" + sfx(m), k)):
+                boxes(ob(stage, "downstream_reproducibility" + sfx(m), k), f"reproducibility ({MNAME[m]}, same seed)",
+                      MOD_COLOUR)
+            if m == "jaccard":
+                _clusters_box(stage, k)
+            table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "n_clusters",
+                                       "downstream_stability", "downstream_stability_min", "downstream_stability_jaccard",
+                                       "downstream_reproducibility", "downstream_reproducibility_jaccard"]))
+        per_res(pane, measured=True)
         return
     own = "pca_agreement" if stage == "pca" else "knn_shared"
     measure = M[own]["name"].lower()
     explain("stability", own)
-    print(f"#### On the stage's own measure\n")
+    print("#### On the stage's own measure\n")
     boxes(ob(stage, "stage_stability"), f"stability ({measure})", MOD_COLOUR, note=BOX_NOTE)
     t = st(stage)
-    m = sorted(t.loc[t["stage_stability"].isna(), "module"].unique())
-    if m:
-        print(f"\n_No seed (exact or deterministic): {', '.join(m)}. Their run-to-run differences are "
+    nos = sorted(t.loc[t["stage_stability"].isna(), "module"].unique())
+    if nos:
+        print(f"\n_No seed (exact or deterministic): {', '.join(nos)}. Their run-to-run differences are "
               "reproducibility._\n")
     if len(ob(stage, "stage_reproducibility")):
         boxes(ob(stage, "stage_reproducibility"), f"reproducibility ({measure})", MOD_COLOUR)
     table(cols(t, ["module", "dataset", "size", "cells", "stage_stability", "stage_reproducibility"]))
-    print(f"#### Downstream: the final clusters\n")
-    explain("downstream")
+    print("#### Downstream: the final clusters\n")
+    explain("downstream", "jaccard", "worst")
 
-    def pane(k):
+    def pane(k, m):
         res = ("the baseline pipeline's oracle resolution" if k == ORACLE else f"resolution {k}")
-        print(f"Leiden at {res}.\n")
-        boxes(ob(stage, "downstream_stability", k), "downstream stability (ARI)", MOD_COLOUR, note=BOX_NOTE)
-        table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "downstream_stability",
-                                   "downstream_reproducibility"]))
-    per_res(pane)
+        print(f"Leiden at {res}. {MEASURE_NOTE[m]}\n")
+        boxes(ob(stage, "downstream_stability" + sfx(m), k), f"downstream stability ({MNAME[m]})", MOD_COLOUR,
+              note=BOX_NOTE)
+        if m == "jaccard":
+            _clusters_box(stage, k)
+        table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "n_clusters", "downstream_stability",
+                                   "downstream_stability_min", "downstream_stability_jaccard",
+                                   "downstream_reproducibility", "downstream_reproducibility_jaccard"]))
+    per_res(pane, measured=True)
 
 
-def _conc(stage, k, measure):
-    c = ob(stage, "between", k)
-    floors = ob(stage, "stage_stability" if stage != "cluster" else "downstream_stability",
+def _conc(stage, k, measure, m=None):
+    sx = sfx(m) if stage == "cluster" else ""
+    c = ob(stage, "between" + sx, k)
+    floors = ob(stage, ("stage_stability" if stage != "cluster" else "downstream_stability" + sx),
                 ANY if stage != "cluster" else k)
     floors = floors.assign(group=floors["group"] + " (own seeds)")
     o = pd.concat([c, floors])
@@ -386,8 +521,8 @@ def _conc(stage, k, measure):
     boxes(o, measure, colours, order=pairs + sorted(floors["group"].unique()),
           note=BOX_NOTE + " _Grey: each implementation's own seed floor._")
     t = stage_conc[stage_conc["stage"] == stage]
-    if "res_key" in t.columns and stage == "cluster":
-        t = t[t["res_key"] == k]
+    if stage == "cluster":
+        t = t[(t["res_key"] == k) & (t["measure"] == m)]
     t = t.rename(columns={"subsample": "size"}).assign(cells=lambda x: [CELLS.get((d, s)) for d, s in zip(x["dataset"], x["size"])])
     table(cols(t.sort_values(["dataset", "cells", "A", "B"]),
                ["dataset", "size", "A", "B", "within A median", "within B median", "between median", "gap A", "gap B"]), 4)
@@ -397,29 +532,57 @@ def concordance(stage):
     if not len(ob(stage, "between", ORACLE if stage == "cluster" else ANY)):
         print("_No pairs of implementations here._\n")
         return
-    own = {"pca": "pca_agreement", "knn": "knn_shared", "cluster": "ari"}[stage]
-    explain("gap", own)
     if stage == "cluster":
-        def pane(k):
+        explain("gap", "ari", "jaccard")
+
+        def pane(k, m):
             res = "the baseline Leiden's oracle resolution" if k == ORACLE else f"resolution {k}"
-            print(f"At {res}, on exact PCA and kNN. Coloured: agreement between two implementations (every "
-                  "pair of their seeds).\n")
-            _conc(stage, k, "ARI")
-        per_res(pane)
+            print(f"At {res}, on exact PCA and kNN. {MEASURE_NOTE[m]} Coloured: agreement between two "
+                  "implementations (every pair of their seeds).\n")
+            _conc(stage, k, MNAME[m], m)
+            if m == "jaccard":
+                _clusters_box(stage, k)
+        per_res(pane, measured=True)
         return
+    own = {"pca": "pca_agreement", "knn": "knn_shared"}[stage]
+    explain("gap", own)
     print("Coloured: agreement between two implementations (every pair of their seeds, same upstream).\n")
     _conc(stage, ANY, M[own]["name"].lower())
 
 
+def _accuracy_pane(tab, k, m, colours, order=None, downstream=False):
+    pre = "downstream " if downstream else ""
+    if m == "ari":
+        boxes(ob(tab, "accuracy_share", k), f"{pre}accuracy (ARI, share of oracle)", colours, order=order, note=BOX_NOTE)
+    else:
+        boxes(ob(tab, "accuracy_jaccard", k), f"{pre}accuracy (Jaccard with the labels)", colours, order=order,
+              note=BOX_NOTE)
+        _clusters_box(tab, k)
+        if not downstream:
+            print("\n**Per cell type**\n")
+            celltype_map(tab, k, order or sorted(colours))
+
+
+def _quality_pane(tab, k, colours, order=None):
+    """Measure-free views at one resolution: homogeneity, completeness, modularity."""
+    print("**Homogeneity and completeness**: which way the clusters miss the labels.\n")
+    boxes(ob(tab, "homogeneity", k), "homogeneity (each cluster one cell type)", colours, order=order)
+    boxes(ob(tab, "completeness", k), "completeness (each cell type one cluster)", colours, order=order)
+    print("**Modularity on the exact kNN graph**, at the run's resolution: how good a partition of the true graph.\n")
+    boxes(ob(tab, "modularity", k), "modularity (exact graph)", colours, order=order)
+
+
 def accuracy(stage):
     if stage == "cluster":
-        explain("accuracy", "oracle_res")
+        explain("accuracy", "jaccard", "n_clusters", "celltype", "homcom", "modularity", "oracle_res")
 
-        def pane(k):
-            print(f"Leiden {res_text(k)}, on exact PCA and kNN.\n")
-            boxes(ob(stage, "accuracy_share", k), "accuracy (share of oracle)", MOD_COLOUR, note=BOX_NOTE)
-            table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "accuracy_ari", "accuracy_share"]))
-        per_res(pane)
+        def pane(k, m):
+            print(f"Leiden {res_text(k)}, on exact PCA and kNN. {MEASURE_NOTE[m]}\n")
+            _accuracy_pane(stage, k, m, MOD_COLOUR)
+            table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "n_clusters", "accuracy_ari",
+                                       "accuracy_share", "accuracy_jaccard", "homogeneity", "completeness", "modularity"]))
+        per_res(pane, measured=True)
+        per_res(lambda k: _quality_pane(stage, k, MOD_COLOUR))
         sl = runs[runs["varies"].isin(["none", "cluster"]) & runs["pca_seed"].astype(str).isin(["0", "nan"])
                   & runs["knn_seed"].astype(str).isin(["0", "nan"])]
         acc = (sl.groupby(["cluster", "dataset", "subsample", "resolution"])["ari_truth"].median()
@@ -433,68 +596,94 @@ def accuracy(stage):
     explain(fid)
     boxes(ob(stage, "fidelity"), "fidelity to exact", MOD_COLOUR, note=BOX_NOTE)
     print("#### Downstream accuracy\n")
-    explain("accuracy", "downstream")
+    explain("accuracy", "downstream", "jaccard", "homcom", "modularity")
 
-    def pane(k):
+    def pane(k, m):
         res = ("the baseline pipeline's oracle resolution, so another resolution cannot rescue a worse "
                f"{STAGE_NAME[stage]}" if k == ORACLE else f"resolution {k}")
-        print(f"Baseline Leiden, seed 0, at {res}.\n")
-        boxes(ob(stage, "accuracy_share", k), "downstream accuracy (share of oracle)", MOD_COLOUR, note=BOX_NOTE)
-        table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "fidelity", "accuracy_ari",
-                                   "accuracy_share"]))
-    per_res(pane)
+        print(f"Baseline Leiden, seed 0, at {res}. {MEASURE_NOTE[m]}\n")
+        _accuracy_pane(stage, k, m, MOD_COLOUR, downstream=True)
+        table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "fidelity", "n_clusters",
+                                   "accuracy_ari", "accuracy_share", "accuracy_jaccard", "homogeneity", "completeness",
+                                   "modularity"]))
+    per_res(pane, measured=True)
+    per_res(lambda k: _quality_pane(stage, k, MOD_COLOUR))
 
 
 def cost(stage):
-    explain("wall", "memory")
+    explain("wall", "cpu", "memory", "trace")
     if stage == "cluster":
         def pane(k):
             print(f"One Leiden run, {res_text(k)}.\n")
             boxes(ob(stage, "cost_s", k), "wall time (s)", MOD_COLOUR, logy=True, note=BOX_NOTE)
+            boxes(ob(stage, "cpu_s", k), "CPU time (core-seconds)", MOD_COLOUR, logy=True)
             boxes(ob(stage, "mem_gb", k), "peak memory (GB)", MOD_COLOUR, logy=True)
-            table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "cost_s", "mem_gb"]), 2)
+            table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "cost_s", "cpu_s", "mem_gb"]), 2)
         per_res(pane)
-        return
-    boxes(ob(stage, "cost_s"), "wall time (s)", MOD_COLOUR, logy=True, note=BOX_NOTE)
-    boxes(ob(stage, "mem_gb"), "peak memory (GB)", MOD_COLOUR, logy=True)
-    table(cols(st(stage), ["module", "dataset", "size", "cells", "cost_s", "mem_gb"]), 2)
+    else:
+        boxes(ob(stage, "cost_s"), "wall time (s)", MOD_COLOUR, logy=True, note=BOX_NOTE)
+        boxes(ob(stage, "cpu_s"), "CPU time (core-seconds)", MOD_COLOUR, logy=True)
+        boxes(ob(stage, "mem_gb"), "peak memory (GB)", MOD_COLOUR, logy=True)
+        table(cols(st(stage), ["module", "dataset", "size", "cells", "cost_s", "cpu_s", "mem_gb"]), 2)
+    print("**Memory over time**\n")
+    trace_plot(stage)
 
 
-def pipeline_pane(k):
-    p = pipes[pipes["res_key"] == k].rename(columns={"subsample": "size"})
-    if not len(p):
-        print("_No pipeline results at this resolution._\n")
-        return
+def _pipe_intro(k):
     if k == ORACLE:
         print("Each pipeline at **its own oracle resolution**; wall time per answer = PCA + kNN + Leiden at "
               "**every** resolution of the sweep, since choosing the best needs them all.\n")
     else:
         print(f"Every pipeline at **resolution {k}**; wall time per answer = PCA + kNN + **one** Leiden run.\n")
-    for metric, label, logy in (("accuracy_share", "accuracy (share of oracle)", False),
-                                ("stability", "stability (ARI between seeds)", False),
-                                ("reproducibility", "reproducibility (ARI, same seed)", False),
-                                ("cost_s", "wall time per answer (s)", True),
-                                ("mem_gb", "peak memory per answer (GB)", True)):
+
+
+def pipeline_pane(k, m):
+    if not len(pipes[pipes["res_key"] == k]):
+        print("_No pipeline results at this resolution._\n")
+        return
+    _pipe_intro(k)
+    print(f"{MEASURE_NOTE[m]}\n")
+    print("\n**Accuracy**\n")
+    _accuracy_pane("pipeline", k, m, PIPE_COLOUR, order=PIPE_ORDER)
+    for metric, label in (("stability", "stability (between seeds)"), ("reproducibility", "reproducibility (same seed)")):
+        o = ob("pipeline", metric + sfx(m), k)
+        if len(o):
+            print(f"\n**{label[0].upper() + label[1:]}**\n")
+            boxes(o, f"{label.split(' (')[0]} ({MNAME[m]})", PIPE_COLOUR, order=PIPE_ORDER)
+
+
+def pipeline_pane_free(k):
+    p = pipes[pipes["res_key"] == k].rename(columns={"subsample": "size"})
+    if not len(p):
+        return
+    _quality_pane("pipeline", k, PIPE_COLOUR, order=PIPE_ORDER)
+    for metric, label in (("cost_s", "wall time per answer (s)"), ("cpu_s", "CPU time per answer (core-seconds)"),
+                          ("mem_gb", "peak memory per answer (GB)")):
         o = ob("pipeline", metric, k)
         if len(o):
             print(f"\n**{label[0].upper() + label[1:]}**\n")
-            boxes(o, label, PIPE_COLOUR, order=PIPE_ORDER, logy=logy,
-                  note=BOX_NOTE if metric == "accuracy_share" else None)
+            boxes(o, label, PIPE_COLOUR, order=PIPE_ORDER, logy=True)
     table(cols(p.sort_values(["dataset", "cells", "pipeline"]),
-               ["pipeline", "dataset", "size", "cells", "resolution", "runs", "accuracy_ari", "accuracy_share",
-                "stability", "reproducibility", "cost_s", "mem_gb"]))
+               ["pipeline", "dataset", "size", "cells", "resolution", "runs", "n_clusters", "accuracy_ari", "accuracy_share",
+                "accuracy_jaccard", "homogeneity", "completeness", "modularity", "stability", "stability_min",
+                "stability_jaccard", "reproducibility", "reproducibility_jaccard", "cost_s", "cpu_s", "mem_gb"]))
 ```
 
 ```{python}
 #| output: asis
 # The resolution slider: sticky at the top of the page, it shows one resolution's panes everywhere.
-css = "".join(f'body[data-res="{k}"] .res-pane[data-res="{k}"] {{ display: block; }}\n' for k in RES_KEYS)
+css = "".join(f'body[data-res="{k}"] .res-pane[data-res="{k}"][data-measure="*"] {{ display: block; }}\n'
+              + "".join(f'body[data-res="{k}"][data-measure="{m}"] .res-pane[data-res="{k}"][data-measure="{m}"] '
+                        '{ display: block; }\n' for m in MEASURES) for k in RES_KEYS)
 labels = ["each method's best (oracle)" if k == ORACLE else k for k in RES_KEYS]
 raw(f"""<style>{css}</style>
 <div id="p2-res"><b>Leiden resolution</b>
 <input type="range" id="p2-res-slider" min="0" max="{len(RES_KEYS) - 1}" step="1" value="0">
-<span id="p2-res-label"></span>
-<span style="color:#777;margin-left:1rem">moves every resolution-dependent result in every tab</span></div>
+<span id="p2-res-label" style="display:inline-block;min-width:13rem"></span>
+<b style="margin-left:1.2rem">Partition agreement</b>
+<label style="margin-left:0.5rem"><input type="radio" name="p2-measure" value="ari" checked> ARI</label>
+<label style="margin-left:0.5rem"><input type="radio" name="p2-measure" value="jaccard"> Jaccard</label>
+<span style="color:#777;margin-left:1rem">both move every result they affect, in every tab</span></div>
 <script>
 (function () {{
   const keys = {json.dumps(RES_KEYS)}, labels = {json.dumps(labels)};
@@ -504,9 +693,15 @@ raw(f"""<style>{css}</style>
     if (window.p2update) window.p2update();
   }}
   window.p2res = () => document.body.dataset.res || keys[0];
+  window.p2measure = () => document.body.dataset.measure || "ari";
   document.addEventListener("DOMContentLoaded", () => {{
     const s = document.getElementById("p2-res-slider");
     s.addEventListener("input", () => set(+s.value));
+    document.querySelectorAll('input[name="p2-measure"]').forEach(r => r.addEventListener("change", () => {{
+      document.body.dataset.measure = r.value;
+      if (window.p2update) window.p2update();
+    }}));
+    document.body.dataset.measure = "ari";
     set(0);
   }});
 }})();
@@ -558,12 +753,18 @@ table(b, title="Datasets, sizes and accuracy bounds")
 |---|---|
 | **Stability** | How much the result changes when only a seed changes (same output folder), and **reproducibility**: the same seed run again in another folder. |
 | **Concordance** | How much two implementations disagree, against each one's own seed noise (grey). |
-| **Accuracy** | PCA and kNN: **fidelity** to the exact module, and downstream accuracy. Leiden: agreement with the reference labels as a share of the oracle bound. |
-| **Cost** | Wall time and peak memory of the stage's own job; per answer in Full pipeline. |
+| **Accuracy** | PCA and kNN: **fidelity** to the exact module, and downstream accuracy. Leiden: agreement with the reference labels (ARI as a share of the oracle bound, or Jaccard), homogeneity and completeness, per-cell-type recovery, and modularity on the exact graph. |
+| **Cost** | Wall time, CPU time and peak memory of the stage's own job, and memory over time; per answer in Full pipeline. |
 
 **Box plots.** Every figure shows every individual observation as a point (a run, a pair of runs,
 a job), grouped into a box per implementation and size: the box spans the middle half, the line
 is the median, the whiskers reach 1.5 × the box. The tables of medians fold out under each figure.
+
+**Partition agreement** (top of the page): every comparison of two partitions (stability,
+reproducibility and concordance of the clusters, accuracy against the labels) is shown either
+as ARI or as best-match Jaccard. The Jaccard views add the number of clusters, which both
+measures depend on, and per-cell-type recovery; homogeneity, completeness, modularity and
+cost do not depend on the toggle.
 
 **Resolution slider** (top of the page). Leiden runs at every resolution of the sweep; the
 slider shows every resolution-dependent result at one of them. At **each method's best
@@ -656,11 +857,12 @@ score and one threshold rule that combine them.
 
 ```{python}
 #| output: asis
-explain("accuracy", "stability", "wall", "memory")
+explain("accuracy", "jaccard", "stability", "homcom", "modularity", "wall", "cpu", "memory")
 if not len(pipes):
     print("_No named pipelines in these results: run the pipelines slice (scripts/run_pipelines.sh)._\n")
 else:
-    per_res(pipeline_pane)
+    per_res(pipeline_pane, measured=True)
+    per_res(pipeline_pane_free)
 ```
 
 ### Trade-off and thresholds
@@ -670,11 +872,13 @@ else:
 explain("cost", "tradeoff")
 if len(pipes):
     data = pipes.rename(columns={"subsample": "size"})[
-        ["res_key", "dataset", "size", "cells", "pipeline", "accuracy_share", "stability", "cost_s", "mem_gb"]]
+        ["res_key", "dataset", "size", "cells", "pipeline", "accuracy_share", "accuracy_jaccard", "stability",
+         "stability_jaccard", "cost_s", "mem_gb"]]
     data = json.loads(data.to_json(orient="records"))
     raw("""
 <div class="p2-sliders">
-<p>Follows the resolution slider. Best per row highlighted.</p>
+<p>Follows the resolution slider and the partition-agreement toggle: with Jaccard, accuracy is
+the Jaccard with the labels and stability the Jaccard between seeds. Best per row highlighted.</p>
 <label>memory budget B <input type="range" id="w-mem" min="0" max="8" step="1" value="4"> <span></span></label><br>
 <label>w<sub>acc</sub> <input type="range" id="w-acc" min="0" max="3" step="0.25" value="1"> <span></span></label>
 <label>w<sub>stab</sub> <input type="range" id="w-stab" min="0" max="3" step="0.25" value="1"> <span></span></label>
@@ -706,6 +910,9 @@ chosen value.</p>
   }
   function update() {
     const key = window.p2res ? window.p2res() : "oracle";
+    const jac = (window.p2measure ? window.p2measure() : "ari") === "jaccard";
+    const acc = r => jac ? r.accuracy_jaccard : r.accuracy_share;
+    const stab = r => jac ? r.stability_jaccard : r.stability;
     const B = budgets[+$("w-mem").value];
     const w = {acc: +$("w-acc").value, stab: +$("w-stab").value, cost: +$("w-cost").value};
     const t = {acc: +$("t-acc").value, stab: +$("t-stab").value};
@@ -723,7 +930,7 @@ chosen value.</p>
       const cmin = Math.min(...g.map(r => eff(r, B)).filter(isFinite));
       const score = {};
       g.forEach(r => {
-        const s = w.acc * r.accuracy_share + w.stab * r.stability - w.cost * Math.log10(eff(r, B) / cmin);
+        const s = w.acc * acc(r) + w.stab * stab(r) - w.cost * Math.log10(eff(r, B) / cmin);
         score[r.pipeline] = isFinite(s) ? s : null;
       });
       const vals = Object.values(score).filter(v => v !== null);
@@ -736,8 +943,8 @@ chosen value.</p>
     let k = "<table><thead><tr><th>dataset</th><th>size</th><th>cells</th><th>fastest pipeline</th>" +
             "<th>effective cost (s)</th><th>wall time (s)</th><th>peak memory (GB)</th><th>pipelines meeting both</th></tr></thead><tbody>";
     gs.forEach(g => {
-      const bestAcc = Math.max(...g.map(r => r.accuracy_share).filter(isFinite));
-      const ok = g.filter(r => r.accuracy_share >= (1 - t.acc / 100) * bestAcc && r.stability >= t.stab)
+      const bestAcc = Math.max(...g.map(acc).filter(isFinite));
+      const ok = g.filter(r => acc(r) >= (1 - t.acc / 100) * bestAcc && stab(r) >= t.stab)
                   .sort((a, b) => eff(a, B) - eff(b, B));
       k += "<tr><td>" + g[0].dataset + "</td><td>" + g[0].size + "</td><td>" + g[0].cells + "</td><td>" +
            (ok.length ? ok[0].pipeline : "none meets both") + "</td><td>" +
@@ -763,9 +970,10 @@ Every metric in this report: what it measures, how it is computed, and where it 
 ```{python}
 #| output: asis
 groups_ = [("PCA", ["pca_fidelity", "pca_agreement"]), ("kNN", ["knn_recall", "knn_shared"]),
-           ("Clustering and the final clusters", ["ari", "accuracy", "oracle_res"]),
-           ("Across stages", ["stability", "reproducibility", "downstream", "gap"]),
-           ("Cost", ["wall", "memory", "cost"]), ("Summary", ["tradeoff"])]
+           ("Clustering and the final clusters", ["ari", "jaccard", "n_clusters", "accuracy", "celltype", "homcom",
+                                                  "modularity", "oracle_res"]),
+           ("Across stages", ["stability", "reproducibility", "worst", "downstream", "gap"]),
+           ("Cost", ["wall", "cpu", "memory", "trace", "cost"]), ("Summary", ["tradeoff"])]
 for title, keys in groups_:
     print(f"\n### {title}\n")
     for k in keys:
@@ -775,10 +983,10 @@ print("\n### Which measure each subtab uses\n")
 print("""
 | | Stability | Concordance | Accuracy | Cost |
 |---|---|---|---|---|
-| **PCA** | PCA agreement between seeds; downstream ARI | PCA agreement between implementations, gap | PCA fidelity; downstream accuracy | wall time, peak memory |
-| **kNN** | shared neighbours between seeds; downstream ARI | shared neighbours between implementations, gap | kNN recall; downstream accuracy | wall time, peak memory |
-| **Clustering** | ARI between seeds | ARI between implementations, gap | accuracy | wall time, peak memory (one Leiden run) |
-| **Full pipeline** | ARI between seeds (all stages) | — | accuracy | wall time, peak memory per answer; effective cost |
+| **PCA** | PCA agreement between seeds; downstream ARI or Jaccard | PCA agreement between implementations, gap | PCA fidelity; downstream accuracy, homogeneity, completeness, modularity | wall time, CPU time, peak memory, traces |
+| **kNN** | shared neighbours between seeds; downstream ARI or Jaccard | shared neighbours between implementations, gap | kNN recall; downstream accuracy, homogeneity, completeness, modularity | wall time, CPU time, peak memory, traces |
+| **Clustering** | ARI or Jaccard between seeds; number of clusters | ARI or Jaccard between implementations, gap | accuracy (ARI share or Jaccard), per cell type, homogeneity, completeness, modularity | wall time, CPU time, peak memory (one Leiden run), traces |
+| **Full pipeline** | ARI or Jaccard between seeds (all stages) | — | as Clustering | wall time, CPU time, peak memory per answer; effective cost |
 """)
 ```
 

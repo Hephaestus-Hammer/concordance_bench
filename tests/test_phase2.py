@@ -20,6 +20,7 @@ def t(tmp_path_factory):
     df = index_runs([fake_phase2_tree.build(d / "out", 0), fake_phase2_tree.build(d / "out-rep1", 1)])
     runs = phase2.clustering_table(df)
     runs, bounds = phase2.accuracy(df, runs)
+    runs = phase2.add_modularity(df, runs)
     stab, repro = phase2.stability(runs), phase2.reproducibility(runs)
     rt = phase2.rs.runtimes(df)[0]
     cold = phase2.cold_starts(rt)
@@ -172,11 +173,12 @@ def test_stage_concordance_on_the_stages_own_measure(t):
 def test_leiden_concordance_per_resolution_and_at_the_baseline_oracle(t):
     c = phase2.cluster_concordance(t["runs"])
     assert set(c["res_key"]) == {"oracle", "0.5", "1", "2"}
-    row = c[(c["A"] == "cl-baseline") & (c["B"] == "cl-rapids") & (c["dataset"] == "dsA")
-            & (c["subsample"] == "in-small") & (c["res_key"] == "oracle")]
-    assert len(row) == 1 and row["resolution"].iloc[0] == 1.0
-    # cl-rapids merges two groups: further from cl-baseline than either's seeds from themselves
-    assert row["gap A"].iloc[0] > 0
+    for measure in ("ari", "jaccard"):
+        row = c[(c["A"] == "cl-baseline") & (c["B"] == "cl-rapids") & (c["dataset"] == "dsA")
+                & (c["subsample"] == "in-small") & (c["res_key"] == "oracle") & (c["measure"] == measure)]
+        assert len(row) == 1 and row["resolution"].iloc[0] == 1.0
+        # cl-rapids merges two groups: further from cl-baseline than either's seeds from themselves
+        assert row["gap A"].iloc[0] > 0
 
 
 def test_observations_behind_every_median(t):
@@ -198,3 +200,43 @@ def test_observations_behind_every_median(t):
 def test_memory_is_ram_plus_gpu_and_an_answer_takes_its_largest_job():
     rt = pd.DataFrame({"dir": ["a", "b"], "max_rss": [1024.0, 2048.0], "gpu_mem_peak_mb": [np.nan, 1024.0]})
     assert phase2.job_memory_gb(rt) == {"a": 1.0, "b": 3.0}
+
+
+def test_jaccard_best_match_per_cluster_and_symmetric():
+    a = np.array([0, 0, 0, 1, 1, 1, 2, 2])
+    b = np.array([0, 0, 1, 1, 1, 1, 2, 2])
+    ja, jb = phase2.cc.jaccard_best_match(a, b)
+    assert np.allclose(ja, [2 / 3, 3 / 4, 1]) and np.allclose(jb, [2 / 3, 3 / 4, 1])
+    assert phase2.cc.jaccard(a, a) == 1.0
+    # splitting a cluster in two halves: each half matches it with Jaccard 1/2
+    split = np.array([0, 0, 0, 3, 3, 3, 2, 2]), np.array([0, 0, 0, 1, 1, 4, 2, 2])
+    assert phase2.cc.jaccard_best_match(*split)[0][1] == 0 and phase2.cc.jaccard_best_match(split[1], split[0])[0][1] < 1
+
+
+def test_modularity_at_a_resolution():
+    import scipy.sparse as sp
+    g = sp.csr_matrix(np.array([[0, 1, 0, 0], [1, 0, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0]], dtype=float))
+    lab = np.array([0, 0, 1, 1])
+    assert phase2.cc.modularity(g, lab) == pytest.approx(0.5)
+    assert phase2.cc.modularity(g, lab, 2.0) == pytest.approx(0.0)
+
+
+def test_per_run_partition_metrics_and_cell_types(t):
+    r = t["runs"]
+    assert r[["jaccard_truth", "homogeneity", "completeness", "modularity"]].notna().all().all()
+    assert ((r["jaccard_truth"] >= 0) & (r["jaccard_truth"] <= 1)).all()
+    row = _stage(t, "cluster", "cl-rapids")
+    # cl-rapids merges two groups: fewer clusters, and merged clusters hold two cell types
+    assert row["n_clusters"] < _stage(t, "cluster", "cl-baseline")["n_clusters"]
+    assert row["homogeneity"] < _stage(t, "cluster", "cl-baseline")["homogeneity"]
+    ct = []
+    phase2.accuracy(t["df"], t["runs"].head(3), ct)
+    assert len(ct) and {"label", "label_cells", "jaccard"} <= set(ct[0])
+
+
+def test_cpu_time_and_memory_traces(t):
+    assert _pipe(t, "baseline")["cpu_s"] > 0
+    tr = phase2.traces(t["rt"], t["runs"], t["bounds"])
+    assert len(tr) and set(tr["stage"]) == {"pca", "knn", "cluster"}
+    gpu = tr[tr["module"].str.contains("rapids")]
+    assert gpu["gpu_gb"].max() > 0 and tr[~tr["module"].str.contains("rapids")]["gpu_gb"].isna().all()

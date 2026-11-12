@@ -194,13 +194,42 @@ def ari(a, b):
     return float((sum_ij - expected) / (top - expected))
 
 
-def modularity(graph, labels):
-    """Weighted Newman modularity (resolution 1) of a partition of an undirected graph.
+def _contingency(a, b):
+    """Sparse contingency table of two integer-coded partitions, and their cluster sizes."""
+    a, b = np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)
+    n = sp.coo_matrix((np.ones(len(a)), (a, b)), shape=(a.max() + 1, b.max() + 1)).tocsr()
+    n.sum_duplicates()
+    return n, np.bincount(a), np.bincount(b)
+
+
+def jaccard_best_match(a, b):
+    """(per cluster of a, per cluster of b): each cluster's Jaccard index |A ∩ B| / |A ∪ B| with
+    its best-matching cluster in the other partition (as in clusterboot). Integer codes."""
+    n, sa, sb = _contingency(a, b)
+    c = n.tocoo()
+    j = c.data / (sa[c.row] + sb[c.col] - c.data)
+    best_a = np.zeros(len(sa))
+    np.maximum.at(best_a, c.row, j)
+    best_b = np.zeros(len(sb))
+    np.maximum.at(best_b, c.col, j)
+    return best_a, best_b
+
+
+def jaccard(a, b):
+    """Symmetric best-match Jaccard: the mean over clusters (unweighted: every cluster counts
+    the same, however small) in each direction, averaged over the two directions."""
+    ja, jb = jaccard_best_match(a, b)
+    return float((ja.mean() + jb.mean()) / 2)
+
+
+def modularity(graph, labels, resolution=1.0):
+    """Weighted Newman modularity of a partition of an undirected graph, at a resolution
+    (the Reichardt-Bornholdt / RB-configuration objective leidenalg, igraph and cuGraph use).
 
     The objective every Leiden module here maximises on the same connectivities, so
     comparing it across implementations says whether one finds worse partitions or
     only different, equally good ones. graph: symmetric CSR; labels: integer codes.
-    Q = sum over clusters of (weight inside / 2m) - (degree of cluster / 2m)^2.
+    Q = sum over clusters of (weight inside / 2m) - resolution * (degree of cluster / 2m)^2.
     """
     c = graph.tocoo()
     two_m = c.data.sum()
@@ -209,7 +238,7 @@ def modularity(graph, labels):
     same = labels[c.row] == labels[c.col]
     inside = np.bincount(labels[c.row[same]], weights=c.data[same], minlength=k)
     degree = np.bincount(labels, weights=np.asarray(graph.sum(axis=1)).ravel(), minlength=k)
-    return float(inside.sum() / two_m - np.sum((degree / two_m) ** 2))
+    return float(inside.sum() / two_m - resolution * np.sum((degree / two_m) ** 2))
 
 
 def nmi(a, b):
