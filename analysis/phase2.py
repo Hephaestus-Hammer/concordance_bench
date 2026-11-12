@@ -57,7 +57,7 @@ Outputs (phase2_<name>.tsv):
   celltypes                 per cell type (reference label): its best-match Jaccard with the
                             clusters, median over seeds, per Clustering module and named
                             pipeline, dataset, size and res_key
-  traces                    memory over time (RAM and GPU, GB) of one representative job per
+  traces                    memory (RAM and GPU, GB) and cores busy over time of one representative job per
                             module (the median wall time) at each dataset's largest size
   obs                       every individual observation behind the medians, for box plots:
                             tab, metric, group (module, pipeline or "A vs B"), dataset,
@@ -731,8 +731,9 @@ def celltype_table(runs, celltypes, ct_rows):
 
 
 def traces(rt, runs, bounds):
-    """Memory over time of one representative job per stage and module (the median wall time)
-    at each dataset's largest size: RAM (process tree) and GPU memory, GB."""
+    """Memory and CPU over time of one representative job per stage and module (the median wall
+    time) at each dataset's largest size: RAM (process tree) and GPU memory, GB, and cores busy
+    (CPU use / 100 %)."""
     if not len(rt) or not len(runs):
         return pd.DataFrame()
     from obkit import prof
@@ -759,7 +760,8 @@ def traces(rt, runs, bounds):
             gb = smp.get("gpu_mem_bytes")
             out.append({"dataset": d, "subsample": r["subsample"], "cells": r["cells"], "stage": stage,
                         "module": module, "t_s": (smp["ts_ms"] - tr["t0_ms"]) / 1000.0,
-                        "ram_gb": smp["mem_rss_kb"] / 1024 ** 2, "gpu_gb": gb / 1024 ** 3 if gb is not None else np.nan})
+                        "ram_gb": smp["mem_rss_kb"] / 1024 ** 2, "gpu_gb": gb / 1024 ** 3 if gb is not None else np.nan,
+                        "cores": smp["cpu_usage"] / 100.0})
     return pd.DataFrame(out)
 
 

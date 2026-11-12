@@ -200,29 +200,49 @@ def celltype_map(tab, k, groups_order):
 
 
 def trace_plot(stage):
-    """RAM (solid) and GPU memory (dashed) over the run of one representative job per module."""
+    """RAM (solid) and GPU memory (dashed) on the left axis, cores busy (dotted) on the right,
+    over the run of one representative job per module."""
     t = traces[traces["stage"] == stage] if len(traces) else traces
     if not len(t):
         print("\n_No denet traces in these results._\n")
         return
-    fig, axes = plt.subplots(1, len(datasets), figsize=(max(6.5, 4.2 * len(datasets)), 3.0), sharey=True,
+    fig, axes = plt.subplots(1, len(datasets), figsize=(max(7, 4.6 * len(datasets)), 3.0),
                              constrained_layout=True, squeeze=False)
     seen = {}
+    twins = []
     for ax, d in zip(axes[0], datasets):
         x = t[t["dataset"] == d]
+        tw = ax.twinx()
+        twins.append(tw)
+        tw.grid(False)
         for mod, g in x.groupby("module"):
             g = g.sort_values("t_s")
-            seen[mod] = ax.plot(g["t_s"], g["ram_gb"], color=MOD_COLOUR.get(mod, "#52514e"), lw=1.4)[0]
+            c = MOD_COLOUR.get(mod, "#52514e")
+            seen[mod] = ax.plot(g["t_s"], g["ram_gb"], color=c, lw=1.4)[0]
             if g["gpu_gb"].notna().any():
-                ax.plot(g["t_s"], g["gpu_gb"], color=MOD_COLOUR.get(mod, "#52514e"), lw=1.2, ls="--")
+                ax.plot(g["t_s"], g["gpu_gb"], color=c, lw=1.2, ls="--")
+            if "cores" in g and g["cores"].notna().any():
+                tw.plot(g["t_s"], g["cores"], color=c, lw=1.0, ls=":", alpha=0.9)
         if len(x):
             ax.set_title(f"{d} · {x['cells'].iloc[0] / 1000:g}k cells", loc="left")
         ax.set_xlabel("time since the job started (s)")
+        ax.set_ylim(bottom=0)
+        tw.set_ylim(bottom=0)
+        tw.set_ylabel("cores busy")
     axes[0][0].set_ylabel("memory (GB)")
-    fig.legend(seen.values(), seen.keys(), loc="outside right center", frameon=False, fontsize=7)
+    top = 1.1 * max(tw.get_ylim()[1] for tw in twins)
+    for tw in twins:
+        tw.set_ylim(0, top)
+    from matplotlib.lines import Line2D
+    styles = [Line2D([], [], color="#52514e", lw=1.4, label="RAM (left)"),
+              Line2D([], [], color="#52514e", lw=1.2, ls="--", label="GPU memory (left)"),
+              Line2D([], [], color="#52514e", lw=1.0, ls=":", label="cores busy (right)")]
+    fig.legend([*seen.values(), *styles], [*seen.keys(), *(h.get_label() for h in styles)],
+               loc="outside right center", frameon=False, fontsize=7)
     show(fig)
-    print("\n_Solid: RAM of the job's process tree; dashed: GPU memory. One job per module: the one with "
-          "the median wall time at each dataset's largest size._\n")
+    print("\n_Left axis: RAM of the job's process tree (solid) and GPU memory (dashed). Right axis: cores "
+          "busy (dotted; 1 = one core fully used). One job per module: the one with the median wall time at "
+          "each dataset's largest size._\n")
 
 
 def ob(tab, metric, key=ANY):
@@ -425,10 +445,12 @@ metric("cpu", "CPU time", "every Cost subtab",
        "GPU work is not in it.",
        r"T_{\mathrm{CPU}} = \int_0^{T} \mathrm{cores}(t)\, dt", [("\\mathrm{cores}(t)", "cores busy at time t")],
        "core-seconds; lower is better")
-metric("trace", "Memory traces", "every Cost subtab",
-       "Memory over the run of one representative job per implementation (the one with the median wall "
-       "time, at each dataset's largest size): the shape behind the peak, such as a spike while loading or "
-       "a GPU allocation held throughout.", r"\mathrm{RAM}(t),\; \mathrm{GPU}(t)", [], "")
+metric("trace", "Memory and CPU traces", "every Cost subtab",
+       "Memory and processor use over the run of one representative job per implementation (the one with "
+       "the median wall time, at each dataset's largest size): the shape behind the peak and the CPU time, "
+       "such as a spike while loading, a GPU allocation held throughout, or a single busy core.",
+       r"\mathrm{RAM}(t),\; \mathrm{GPU}(t),\; \mathrm{cores}(t)",
+       [("\\mathrm{cores}(t)", "CPU use at time t / 100 %: 1 = one core fully busy, 8 = eight")], "")
 metric("worst", "Worst pair", "the tables of Stability and Full pipeline",
        "The lowest agreement among all pairs of seeds: how far an unlucky seed can take you. Shown next "
        "to the median in the tables; the box plots show all pairs.",
@@ -625,7 +647,7 @@ def cost(stage):
         boxes(ob(stage, "cpu_s"), "CPU time (core-seconds)", MOD_COLOUR, logy=True)
         boxes(ob(stage, "mem_gb"), "peak memory (GB)", MOD_COLOUR, logy=True)
         table(cols(st(stage), ["module", "dataset", "size", "cells", "cost_s", "cpu_s", "mem_gb"]), 2)
-    print("**Memory over time**\n")
+    print("**Memory and CPU over time**\n")
     trace_plot(stage)
 
 

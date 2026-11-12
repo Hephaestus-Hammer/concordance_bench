@@ -240,3 +240,4 @@ def test_cpu_time_and_memory_traces(t):
     assert len(tr) and set(tr["stage"]) == {"pca", "knn", "cluster"}
     gpu = tr[tr["module"].str.contains("rapids")]
     assert gpu["gpu_gb"].max() > 0 and tr[~tr["module"].str.contains("rapids")]["gpu_gb"].isna().all()
+    assert (tr["cores"] == 1.0).all()  # the fake traces run one core flat out
