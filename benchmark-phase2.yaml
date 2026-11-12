@@ -19,7 +19,7 @@
 id: concordance_bench_phase2
 name: concordance-bench phase 2
 description: Accuracy, stability and cost of scanpy, baseline and rapids-singlecell pipelines across datasets and sizes
-benchmarker: "CHANGE_ME <CHANGE_ME>"
+benchmarker: "Benjamin Griffiths"
 version: "0.2.0"
 api_version: "0.7.0"
 
@@ -37,32 +37,12 @@ stages:
     outputs:
       - {id: data_h5ad, path: "{name}.h5ad"}
     modules:
-      - id: hao2021
+      - id: hao2021_100k
         software_environment: data
         repository: &hf {url: https://github.com/omnibenchmark/omni-huggingface, commit: dd042df5956fff3a022dde98a0fffa3e5517c503}
         parameters:
           - {repo: btraven/sc-brrr-hao2021, repo_type: dataset, revision: a61cd45f32445b9a84b6e003d64e463712fbf5af,
              files: hao2021_100k.h5ad, sha256: a8cbaaeef5651f699e11dd3719681488b3470b3bd8d8209070bf5cad466f81ad}
-      - id: pancreas
-        software_environment: data
-        repository: *hf
-        parameters:
-          - {repo: CHANGE_ME, repo_type: dataset, revision: CHANGE_ME, files: pancreas.h5ad, sha256: CHANGE_ME}
-      - id: tm-facs
-        software_environment: data
-        repository: *hf
-        parameters:
-          - {repo: CHANGE_ME, repo_type: dataset, revision: CHANGE_ME, files: tm-facs.h5ad, sha256: CHANGE_ME}
-      - id: tm-droplet
-        software_environment: data
-        repository: *hf
-        parameters:
-          - {repo: CHANGE_ME, repo_type: dataset, revision: CHANGE_ME, files: tm-droplet.h5ad, sha256: CHANGE_ME}
-      - id: aifi-d1
-        software_environment: data
-        repository: *hf
-        parameters:
-          - {repo: CHANGE_ME, repo_type: dataset, revision: CHANGE_ME, files: aifi-d1.h5ad, sha256: CHANGE_ME}
 
   # One module per subsample size: nested, label-stratified subsamples (modules/dataset_input.py).
   # A size larger than a dataset excludes it; in-all is each dataset whole (Hao's whole is in-100k).
@@ -77,7 +57,7 @@ stages:
     modules:
       - id: in-5k
         software_environment: scanpy
-        repository: &input {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: CHANGE_ME, entrypoint: dataset_input}
+        repository: &input {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: 26e92dab250548e5d66bc105b2611f49bd579cb0, entrypoint: dataset_input}
         parameters:
           - {n_cells: 5000, replicate: 0}
       - id: in-10k
@@ -88,27 +68,18 @@ stages:
       - id: in-25k
         software_environment: scanpy
         repository: *input
-        exclude: [pancreas]
         parameters:
           - {n_cells: 25000, replicate: 0}
       - id: in-50k
         software_environment: scanpy
         repository: *input
-        exclude: [pancreas, tm-facs]
         parameters:
           - {n_cells: 50000, replicate: 0}
       - id: in-100k
         software_environment: scanpy
         repository: *input
-        exclude: [pancreas, tm-facs, tm-droplet]
         parameters:
           - {n_cells: 100000, replicate: 0}
-      - id: in-all
-        software_environment: scanpy
-        repository: *input
-        exclude: [hao2021]
-        parameters:
-          - {n_cells: 0, replicate: 0}
 
   # Exact: covariance-eigh (CPU baseline, GPU), jacobi (GPU, dense). Approximate and seeded:
   # randomized and lanczos, each on CPU (the fork, implicit centring on sparse input) and GPU
@@ -125,9 +96,9 @@ stages:
         name: "Baseline: PCA (covariance_eigh, float64, 1 BLAS thread)"
         software_environment: scanpy
         resources: {cores: 1, mem_mb: 16000}
-        repository: &stage {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: 52c8c6466e394179cb12fd63972dce27731b7ada, entrypoint: stage}
+        repository: &stage {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: 1e341e1afaba453e6ee46511609f86d06aed9105, entrypoint: stage}
         parameters:
-          - {module: &m_fork "https://github.com/Hephaestus-Hammer/scanpy@CHANGE_ME", script: pca.py, solver: covariance_eigh, n_components: 50, dtype: float64, blas_threads: 1, random_seed: 0}
+          - {module: &m_fork "https://github.com/Hephaestus-Hammer/scanpy@0bfc35e282cc40c5bc6a8497de361e8b18f7ea55", script: pca.py, solver: covariance_eigh, n_components: 50, dtype: float64, blas_threads: 1, random_seed: 0}
       - id: pc-scanpy
         name: "scanpy defaults: PCA (arpack)"
         software_environment: scanpy

@@ -7,14 +7,14 @@ picks:
     '*': all
   pca:
     pc-baseline:
-    - 663a2fe8
+    - 470aa5b4
   knn:
     nn-baseline:
-    - dddfd7d8
+    - 1958ba40
   cluster:
     cl-baseline:
-    - 747fa3b5
-    - 0d199718
-    - d83bc544
-    - 8f54e79a
-    - 05073d08
+    - 27d89e04
+    - 0df21a92
+    - d318d8bd
+    - ada71dbe
+    - 5c6afdd2

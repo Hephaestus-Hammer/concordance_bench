@@ -7,14 +7,14 @@ picks:
     '*': all
   pca:
     pc-scanpy:
-    - d97ed435
+    - 00ebba5f
   knn:
     nn-scanpy:
-    - 880693d0
+    - e3fb7d2e
   cluster:
     cl-scanpy:
-    - f860d761
-    - e3f852c8
-    - ce73fafe
-    - d0619b75
-    - ee4616f5
+    - 38d403ae
+    - d2625f19
+    - 3efccb83
+    - c6f86a18
+    - 94900a8c
