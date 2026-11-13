@@ -795,6 +795,7 @@ ftab = tsv("folders")
 
 def _folder(r):
     bits = [f"PCA in {r.precision}" if isinstance(r.precision, str) and r.precision else "",
+            f"{r.format} files" if isinstance(getattr(r, "format", ""), str) and getattr(r, "format", "") not in ("", "omni") else "",
             r.hardware.replace("_", ", ") if isinstance(r.hardware, str) and r.hardware else ""]
     bits = [b for b in bits if b]
     return f"`{r.folder}`" + (f" ({'; '.join(bits)})" if bits else "")

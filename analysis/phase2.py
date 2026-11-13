@@ -923,6 +923,7 @@ def main():
             out / f"phase2_{name}.tsv", sep="\t", index=False)
     pd.DataFrame({"folder": [Path(f).name for f in args.from_out],
                   "precision": [_folder_part(f, ("float32", "float64")) for f in args.from_out],
+                  "format": [_folder_part(f, ("10x", "h5ad", "h5ad-dense")) or "omni" for f in args.from_out],
                   "hardware": [_folder_hardware(f) for f in args.from_out]}).to_csv(
         out / "phase2_folders.tsv", sep="\t", index=False)
     print(f"wrote {out}/phase2_*.tsv: {len(runs)} clusterings, {len(stages)} stage rows, "

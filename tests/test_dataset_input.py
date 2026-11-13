@@ -84,3 +84,35 @@ def test_publish_then_input_round_trip(tmp_path):
     subprocess.run([sys.executable, ROOT / "modules" / "dataset_input.py", "--output_dir", tmp_path / "o",
                     "--name", "t", "--data_h5ad", tmp_path / "pub.h5ad", "--n_cells", "500"], check=True)
     assert len(pd.read_csv(tmp_path / "o" / "t.clusters_truth.tsv", sep="\t")) == 500
+
+
+@pytest.mark.parametrize("fmt,layout", [("omni", "sparse"), ("10x", "sparse"), ("h5ad", "sparse"), ("h5ad", "dense")])
+def test_every_format_round_trips_and_is_detected(tmp_path, fmt, layout):
+    from matrix_formats import detect, read_matrix, write_matrix
+    rng = np.random.default_rng(0)
+    X = sp.random(50, 20, density=0.2, random_state=0, format="csr", dtype=np.float64)
+    genes, cells = [f"g{i}" for i in range(20)], [f"c{i}" for i in range(50)]
+    path = tmp_path / "m.h5"
+    write_matrix(X, genes, cells, path, fmt, layout)
+    assert detect(path) == fmt
+    a = read_matrix(path)
+    assert sp.issparse(a.X) == (layout == "sparse")
+    assert list(a.obs_names) == cells and list(a.var_names) == genes
+    dense = a.X.toarray() if sp.issparse(a.X) else a.X
+    assert np.allclose(dense, X.toarray(), atol=1e-6)
+    assert not sp.issparse(read_matrix(path, dense=True).X)
+
+
+def test_dense_needs_h5ad(tmp_path):
+    from matrix_formats import write_matrix
+    with pytest.raises(ValueError):
+        write_matrix(sp.eye(3, format="csr"), ["a", "b", "c"], ["x", "y", "z"], tmp_path / "m.h5", "10x", "dense")
+
+
+def test_10x_output_reads_with_scanpy(tmp_path):
+    sc = pytest.importorskip("scanpy")
+    from matrix_formats import write_matrix
+    X = sp.random(30, 10, density=0.3, random_state=1, format="csr", dtype=np.float32)
+    write_matrix(X, [f"g{i}" for i in range(10)], [f"c{i}" for i in range(30)], tmp_path / "m.h5", "10x")
+    a = sc.read_10x_h5(tmp_path / "m.h5")
+    assert a.shape == (30, 10) and np.allclose(a.X.toarray(), X.toarray())

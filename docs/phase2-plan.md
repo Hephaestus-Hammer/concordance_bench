@@ -134,6 +134,18 @@ GPU), with tables and report in `results/phase2_<same>`.
 - Same-seed replicates of either: `REP=rep1` adds `_rep1` to the folder; analyse replicate
   folders of one precision and one hardware together.
 
+### File formats
+
+The input modules can write the matrix in three HDF5 formats, all to the same path, which the
+PCA modules detect from the file's layout (`modules/matrix_formats.py`): **omni** (the
+omni-scrna CSC layout, the default and what every module read so far), **10x** (Cell Ranger
+v3 HDF5, read with `scanpy.read_10x_h5`) and **h5ad** (AnnData, CSR or dense: `layout`).
+`FORMAT=10x|h5ad|h5ad-dense` in `scripts/run_phase2.sbatch` writes a plan variant with the
+format on every input module and its own filters. Only PCA reads the matrix, so a format run
+needs only the PCA slice (`SLICES=pca PIPELINES=none`); what the format changes is the PCA
+job's load phase (and, dense, which code path PCA takes). Needs input, scanpy-fork and
+rapids commits that write and read the formats.
+
 ## Metrics
 
 The report is organised by stage. Each stage tab (PCA, kNN, Clustering) has the same four
