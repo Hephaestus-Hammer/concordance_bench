@@ -17,6 +17,12 @@
 #    through but swallows the script's output, so stdout and stderr go to
 #    <output_dir>/module.log and are replayed into the job's log afterwards.
 # 3. Without denet in the job's environment, the script runs unprofiled.
+# 4. Cold compilation caches: every job gets fresh, empty caches for code compiled at run
+#    time, so each job pays its compilation cost as a first-time user would, CPU and GPU
+#    alike: numba (pynndescent, umap-learn) via NUMBA_CACHE_DIR, CuPy kernels via
+#    CUPY_CACHE_DIR, and the CUDA driver's PTX cache via CUDA_CACHE_DISABLE. The caches
+#    are deleted after the job. CONCORDANCE_CACHE=warm keeps the usual shared caches.
+#    Not covered: Python bytecode (compiled at install) and the OS page cache.
 #
 # A wrapper because ob 0.7.0 runs an entrypoint like "denet pca.py" as `python3 denet pca.py`.
 set -euo pipefail
@@ -73,14 +79,26 @@ for i in "${!args[@]}"; do
   esac
 done
 out=$abs
+
+# 4. cold compilation caches, unless CONCORDANCE_CACHE=warm
+if [[ ${CONCORDANCE_CACHE:-cold} != warm ]]; then
+  jit=$(mktemp -d "${TMPDIR:-/tmp}/concordance-jit.XXXXXX")
+  trap 'rm -rf "$jit"' EXIT
+  export NUMBA_CACHE_DIR=$jit/numba CUPY_CACHE_DIR=$jit/cupy CUDA_CACHE_DISABLE=1
+  echo "stage: compilation caches cold ($jit, removed after the job)" >&2
+else
+  echo "stage: compilation caches warm (shared)" >&2
+fi
+
 cd "$dir"
 export PYTHONUNBUFFERED=1  # prints and tracebacks in order in module.log
+rc=0
 if command -v denet >/dev/null; then
-  rc=0
   denet --json --quiet --gpu --write-env --out "$out/denet.jsonl" \
     run bash -c 'exec python3 "$@" >"$0" 2>&1' "$out/module.log" "$script" ${args[@]+"${args[@]}"} || rc=$?
   cat "$out/module.log" >&2
-  exit $rc
+else
+  # 3. no denet: unprofiled
+  python3 "$script" ${args[@]+"${args[@]}"} || rc=$?
 fi
-# 3. no denet: unprofiled
-exec python3 "$script" ${args[@]+"${args[@]}"}
+exit $rc

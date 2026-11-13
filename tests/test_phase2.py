@@ -1,0 +1,243 @@
+"""analysis/phase2.py on a fake Phase 2 tree with known effects (tests/fake_phase2_tree.py)."""
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "analysis"))
+sys.path.insert(0, str(ROOT / "tests"))
+import fake_phase2_tree  # noqa: E402
+import phase2  # noqa: E402
+from load import index_runs  # noqa: E402
+
+@pytest.fixture(scope="module")
+def t(tmp_path_factory):
+    d = tmp_path_factory.mktemp("p2")
+    df = index_runs([fake_phase2_tree.build(d / "out", 0), fake_phase2_tree.build(d / "out-rep1", 1)])
+    runs = phase2.clustering_table(df)
+    runs, bounds = phase2.accuracy(df, runs)
+    runs = phase2.add_modularity(df, runs)
+    stab, repro = phase2.stability(runs), phase2.reproducibility(runs)
+    rt = phase2.rs.runtimes(df)[0]
+    cold = phase2.cold_starts(rt)
+    pca, pca_pairs = phase2.pca_stage(df)
+    knn, knn_pairs = phase2.knn_stage(df)
+    pca, knn = phase2.add_cost(pca, rt, cold), phase2.add_cost(knn, rt, cold)
+    ans = phase2.answers(runs, rt, cold)
+    stages = phase2.stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold)
+    pipes, pipe_runs = phase2.pipelines_summary(phase2.named_pipeline_runs(runs), bounds, stab, repro, ans)
+    return dict(df=df, runs=runs, bounds=bounds, stab=stab, repro=repro, pca=pca, knn=knn,
+                stages=stages, ans=ans, pipes=pipes, pipe_runs=pipe_runs, pca_pairs=pca_pairs,
+                knn_pairs=knn_pairs, rt=rt, cold=cold)
+
+
+def _stage(t, stage, module, ds="dsA", sub="in-small", key="oracle"):
+    s = t["stages"]
+    s = s[(s["stage"] == stage) & (s["module"] == module) & (s["dataset"] == ds) & (s["subsample"] == sub)
+          & (s["res_key"] == key)]
+    assert len(s) == 1
+    return s.iloc[0]
+
+
+def _pipe(t, name, ds="dsA", sub="in-small", key="oracle"):
+    p = t["pipes"]
+    p = p[(p["pipeline"] == name) & (p["dataset"] == ds) & (p["subsample"] == sub) & (p["res_key"] == key)]
+    assert len(p) == 1
+    return p.iloc[0]
+
+
+def test_bounds(t):
+    b = t["bounds"]
+    assert len(b) == 4 and (b["chance"] == 0).all() and (b["oracle"] > 0.95).all()
+
+
+def test_pca_fidelity_is_the_missed_components_variance_share(t):
+    # pc-randomized replaces the exact PCA's last component: it loses exactly that share
+    emb = t["pca"]
+    row = _stage(t, "pca", "pc-randomized")
+    base = emb[(emb["module"] == "pc-baseline") & (emb["dataset"] == "dsA") & (emb["subsample"] == "in-small")]
+    assert base["fidelity"].iloc[0] == pytest.approx(1.0)
+    assert 0.95 < row["fidelity"] < 1.0
+    assert _stage(t, "pca", "pc-rapids")["fidelity"] == pytest.approx(1.0, abs=1e-6)
+    assert 0.95 < row["stage_stability"] < 1.0 and row["stage_reproducibility"] == pytest.approx(1.0)
+
+
+def test_knn_fidelity_is_recall(t):
+    assert 0.95 < _stage(t, "knn", "nn-scanpy")["fidelity"] < 0.99      # 3% of neighbours replaced
+    assert _stage(t, "knn", "nn-rapids")["fidelity"] == pytest.approx(1.0)
+
+
+def test_stage_tabs_vary_only_their_own_seed(t):
+    # deterministic modules have no seed to vary: no stability, not Leiden's borrowed
+    for stage, module in (("pca", "pc-baseline"), ("pca", "pc-rapids"), ("knn", "nn-baseline")):
+        assert np.isnan(_stage(t, stage, module)["downstream_stability"])
+    assert np.isfinite(_stage(t, "pca", "pc-randomized")["downstream_stability"])
+    s = t["stages"].query("stage != 'cluster'")
+    assert (s[s["res_key"] == "oracle"]["resolution_rule"] == "baseline oracle").all()
+    assert (s[s["res_key"] != "oracle"]["resolution_rule"] == "fixed").all()
+
+
+def test_clustering_stage(t):
+    base, gpu = _stage(t, "cluster", "cl-baseline"), _stage(t, "cluster", "cl-rapids")
+    assert base["resolution"] == gpu["resolution"] == 1.0
+    assert gpu["accuracy_ari"] < base["accuracy_ari"] - 0.05
+    assert base["stage_reproducibility"] == pytest.approx(1.0) and gpu["stage_reproducibility"] < 0.95
+    assert base["cost_s"] == 2 and gpu["cost_s"] == 0.5
+
+
+def test_named_pipelines_matched_seeds_and_cost(t):
+    assert set(t["pipes"]["pipeline"]) == {"baseline", "tuned-cpu", "all-gpu", "hybrid"}
+    tuned = _pipe(t, "tuned-cpu")
+    assert tuned["runs"] == 2 * 4  # 4 matched seeds x 2 folders, not every seed combination
+    assert _pipe(t, "baseline")["cost_s"] == pytest.approx(10 + 8 + 3 * 2)  # PCA + kNN + 3 Leiden
+    assert _pipe(t, "hybrid")["cost_s"] == pytest.approx(1 + 0.5 + 3 * 2)
+    assert _pipe(t, "all-gpu")["log10_cost_vs_fastest"] == 0
+    assert _pipe(t, "all-gpu")["reproducibility"] < 0.95 and _pipe(t, "hybrid")["reproducibility"] == pytest.approx(1.0)
+    assert len(t["pipe_runs"]) == t["pipes"]["runs"].sum()
+
+
+def test_every_summary_at_every_resolution(t):
+    keys = {"oracle", "0.5", "1", "2"}
+    assert set(t["stages"]["res_key"]) == keys and set(t["pipes"]["res_key"]) == keys
+    # resolution-free columns repeat; resolution-dependent ones follow the slider
+    r = t["stages"].query("stage == 'pca' and module == 'pc-randomized' and dataset == 'dsA' and subsample == 'in-small'")
+    assert r["fidelity"].nunique() == 1 and r["accuracy_ari"].nunique() > 1
+    fixed = _stage(t, "cluster", "cl-baseline", key="1")
+    assert fixed["resolution"] == 1.0 and fixed["resolution_rule"] == "fixed"
+
+
+def test_answer_cost_one_leiden_at_a_fixed_resolution_the_sweep_at_oracle(t):
+    assert _pipe(t, "baseline", key="1")["cost_s"] == pytest.approx(10 + 8 + 2)
+    assert _pipe(t, "baseline")["cost_s"] == pytest.approx(10 + 8 + 3 * 2)
+
+
+def test_cold_start_is_first_rapids_job_per_folder():
+    rt = pd.DataFrame({"dir": ["/x/out/data/a/1", "/x/out/data/a/2", "/x/out-rep1/data/a/3", "/x/out/data/a/4"],
+                       "module": ["cl-rapids", "cl-rapids", "cl-rapids", "cl-baseline"],
+                       "t0_ms": [200.0, 100.0, 300.0, 50.0]})
+    assert phase2.cold_starts(rt) == {"/x/out/data/a/2", "/x/out-rep1/data/a/3"}
+
+
+def test_concordance_compares_implementations_at_equal_swept_settings_only():
+    """Resolutions must match (a swept setting); flavor-like settings may differ (they define
+    the implementation), as in Phase 1 where cl-baseline and cl-scanpy differ in flavor."""
+    import significance as sg
+    from load import Node
+    rng = np.random.default_rng(0)
+    up = (Node("data", "d", ()), Node("input", "i", ()), Node("pca", "p", ()), Node("knn", "k", ()))
+    runs = []
+    for mod, extra in (("cl-a", (("flavor", "x"),)), ("cl-b", (("flavor", "y"),))):
+        for res in (0.5, 1.0):
+            for seed in range(3):
+                node = Node("cluster", mod, tuple(sorted(extra + (("random_seed", seed), ("resolution", res)))))
+                runs.append((up + (node,), rng.integers(0, 4, 200)))
+    t = sg.stage_tests(runs, n_perm=99)
+    assert len(t) == 2
+    assert set(zip(t["A"], t["B"])) == {("cl-a resolution=0.5", "cl-b resolution=0.5"),
+                                         ("cl-a resolution=1.0", "cl-b resolution=1.0")}
+
+
+def test_pca_fidelity_weights_misses_by_variance():
+    import concordance as cc
+    rng = np.random.default_rng(0)
+    v, _ = np.linalg.qr(rng.normal(size=(200, 10)))
+    lam = np.array([50, 20, 10, 5, 4, 3, 2, 1, 0.5, 0.1])
+    other = np.linalg.qr(np.c_[v, rng.normal(size=200)])[0][:, -1]
+    for i in (0, 9):  # miss PC1 (half the variance) or PC10 (almost none)
+        w = v.copy()
+        w[:, i] = other
+        assert cc.pca_fidelity(v, lam, w) == pytest.approx(1 - lam[i] / lam.sum())
+    r = v.copy()
+    c, s = np.cos(0.7), np.sin(0.7)
+    r[:, [3, 4]] = v[:, [3, 4]] @ np.array([[c, -s], [s, c]])
+    r[:, 2] *= -1  # a rotation inside the subspace and a sign flip cost nothing
+    assert cc.pca_fidelity(v, lam, r) == pytest.approx(1.0)
+    assert cc.pca_agreement(v, lam, r, lam) == pytest.approx(1.0)
+
+
+def test_stage_concordance_on_the_stages_own_measure(t):
+    k = phase2.knn_concordance(t["knn"])
+    row = k[(k["A"] == "nn-baseline") & (k["B"] == "nn-scanpy") & (k["dataset"] == "dsA") & (k["subsample"] == "in-small")].iloc[0]
+    # approximate kNN agrees with the exact graph more than its seeds agree with each other
+    assert row["gap B"] < 0 and np.isnan(row["within A median"])
+    assert not any(c.startswith("p ") for c in k.columns)  # no significance tests
+    p = phase2.pca_concordance(t["pca"])
+    row = p[(p["A"] == "pc-baseline") & (p["B"] == "pc-rapids")].iloc[0]
+    assert row["between median"] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_leiden_concordance_per_resolution_and_at_the_baseline_oracle(t):
+    c = phase2.cluster_concordance(t["runs"])
+    assert set(c["res_key"]) == {"oracle", "0.5", "1", "2"}
+    for measure in ("ari", "jaccard"):
+        row = c[(c["A"] == "cl-baseline") & (c["B"] == "cl-rapids") & (c["dataset"] == "dsA")
+                & (c["subsample"] == "in-small") & (c["res_key"] == "oracle") & (c["measure"] == measure)]
+        assert len(row) == 1 and row["resolution"].iloc[0] == 1.0
+        # cl-rapids merges two groups: further from cl-baseline than either's seeds from themselves
+        assert row["gap A"].iloc[0] > 0
+
+
+def test_observations_behind_every_median(t):
+    p = phase2.pair_obs(t["runs"], phase2.KEY, True)
+    s = phase2.summarise_pairs(p, phase2.KEY)
+    stab = phase2.stability(t["runs"])
+    m = s.merge(stab, on=phase2.KEY, suffixes=("", "_ref"))
+    assert len(m) == len(stab) and np.allclose(m["median"], m["median_ref"])
+    obs = []
+    phase2.stages_summary(t["runs"], t["bounds"], t["pca"], t["pca_pairs"], t["knn"], t["knn_pairs"],
+                          t["rt"], t["cold"], obs)
+    o = pd.DataFrame(obs)
+    acc = o[(o["tab"] == "cluster") & (o["metric"] == "accuracy_share") & (o["group"] == "cl-baseline")
+            & (o["dataset"] == "dsA") & (o["subsample"] == "in-small") & (o["res_key"] == "oracle")]
+    assert acc["value"].median() == pytest.approx(_stage(t, "cluster", "cl-baseline")["accuracy_share"])
+    assert set(o.loc[o["tab"] == "pca", "res_key"]) >= {"*", "oracle"}
+
+
+def test_memory_is_ram_plus_gpu_and_an_answer_takes_its_largest_job():
+    rt = pd.DataFrame({"dir": ["a", "b"], "max_rss": [1024.0, 2048.0], "gpu_mem_peak_mb": [np.nan, 1024.0]})
+    assert phase2.job_memory_gb(rt) == {"a": 1.0, "b": 3.0}
+
+
+def test_jaccard_best_match_per_cluster_and_symmetric():
+    a = np.array([0, 0, 0, 1, 1, 1, 2, 2])
+    b = np.array([0, 0, 1, 1, 1, 1, 2, 2])
+    ja, jb = phase2.cc.jaccard_best_match(a, b)
+    assert np.allclose(ja, [2 / 3, 3 / 4, 1]) and np.allclose(jb, [2 / 3, 3 / 4, 1])
+    assert phase2.cc.jaccard(a, a) == 1.0
+    # splitting a cluster in two halves: each half matches it with Jaccard 1/2
+    split = np.array([0, 0, 0, 3, 3, 3, 2, 2]), np.array([0, 0, 0, 1, 1, 4, 2, 2])
+    assert phase2.cc.jaccard_best_match(*split)[0][1] == 0 and phase2.cc.jaccard_best_match(split[1], split[0])[0][1] < 1
+
+
+def test_modularity_at_a_resolution():
+    import scipy.sparse as sp
+    g = sp.csr_matrix(np.array([[0, 1, 0, 0], [1, 0, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0]], dtype=float))
+    lab = np.array([0, 0, 1, 1])
+    assert phase2.cc.modularity(g, lab) == pytest.approx(0.5)
+    assert phase2.cc.modularity(g, lab, 2.0) == pytest.approx(0.0)
+
+
+def test_per_run_partition_metrics_and_cell_types(t):
+    r = t["runs"]
+    assert r[["jaccard_truth", "homogeneity", "completeness", "modularity"]].notna().all().all()
+    assert ((r["jaccard_truth"] >= 0) & (r["jaccard_truth"] <= 1)).all()
+    row = _stage(t, "cluster", "cl-rapids")
+    # cl-rapids merges two groups: fewer clusters, and merged clusters hold two cell types
+    assert row["n_clusters"] < _stage(t, "cluster", "cl-baseline")["n_clusters"]
+    assert row["homogeneity"] < _stage(t, "cluster", "cl-baseline")["homogeneity"]
+    ct = []
+    phase2.accuracy(t["df"], t["runs"].head(3), ct)
+    assert len(ct) and {"label", "label_cells", "jaccard"} <= set(ct[0])
+
+
+def test_cpu_time_and_memory_traces(t):
+    assert _pipe(t, "baseline")["cpu_s"] > 0
+    tr = phase2.traces(t["rt"], t["runs"], t["bounds"])
+    assert len(tr) and set(tr["stage"]) == {"pca", "knn", "cluster"}
+    gpu = tr[tr["module"].str.contains("rapids")]
+    assert gpu["gpu_gb"].max() > 0 and tr[~tr["module"].str.contains("rapids")]["gpu_gb"].isna().all()
+    assert (tr["cores"] == 1.0).all()  # the fake traces run one core flat out

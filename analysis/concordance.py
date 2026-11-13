@@ -20,6 +20,11 @@ def read_embedding(path):
     return pd.read_csv(path, sep="\t", index_col=0)
 
 
+def read_loadings(path):
+    """loadings_tsv: header gene_id + one column per component; genes as rows."""
+    return pd.read_csv(path, sep="\t", index_col=0)
+
+
 def read_neighbors(path):
     """neighbors_h5: kNN distances as CSR at the file root, cell_ids alongside."""
     with h5py.File(path, "r") as h5:
@@ -27,6 +32,15 @@ def read_neighbors(path):
         n = len(cells)
         d = sp.csr_matrix((h5["data"][:], h5["indices"][:], h5["indptr"][:]), shape=(n, n))
     return d, cells
+
+
+def read_connectivities(path):
+    """neighbors_h5: the connectivities (nested group) every Leiden module clusters on, cell_ids alongside."""
+    with h5py.File(path, "r") as h5:
+        cells = pd.Index(h5["cell_ids"][:].astype(str))
+        g, n = h5["connectivities"], len(cells)
+        c = sp.csr_matrix((g["data"][:], g["indices"][:], g["indptr"][:]), shape=(n, n))
+    return c, cells
 
 
 def read_clusters(path):
@@ -81,6 +95,28 @@ def pca_max_angle(a, b, k=None, qa=None, qb=None):
 
 
 # ---- kNN -----------------------------------------------------------------------
+
+def pca_fidelity(v_exact, variance, v_other):
+    """Share of the exact top-k variance that another solver's subspace holds.
+
+    sum_i lambda_i * ||Q^T v_i||^2 / sum_i lambda_i, with v_i the exact component i
+    (genes x k columns), lambda_i its variance, and Q an orthonormal basis of the other
+    solver's loadings (orthonormalised: not every solver returns exactly orthonormal
+    loadings). In [0, 1]. A missed component costs its share of the variance; rotations
+    inside the subspace (near-equal eigenvalues) and sign flips cost nothing.
+    """
+    v = np.asarray(v_exact, dtype=np.float64)
+    v = v / np.linalg.norm(v, axis=0, keepdims=True)
+    q, _ = np.linalg.qr(np.asarray(v_other, dtype=np.float64))
+    captured = ((q.T @ v) ** 2).sum(axis=0)
+    w = np.asarray(variance, dtype=np.float64)
+    return float((w * captured).sum() / w.sum())
+
+
+def pca_agreement(v_a, var_a, v_b, var_b):
+    """pca_fidelity between two runs of one solver (seeds), averaged over both directions."""
+    return 0.5 * (pca_fidelity(v_a, var_a, v_b) + pca_fidelity(v_b, var_b, v_a))
+
 
 def neighbours_per_cell(d):
     """Stored neighbours per cell, not counting the cell itself (median over cells)."""
@@ -156,6 +192,53 @@ def ari(a, b):
     if top == expected:  # both partitions trivial (one cluster each, or all singletons)
         return 1.0
     return float((sum_ij - expected) / (top - expected))
+
+
+def _contingency(a, b):
+    """Sparse contingency table of two integer-coded partitions, and their cluster sizes."""
+    a, b = np.asarray(a, dtype=np.int64), np.asarray(b, dtype=np.int64)
+    n = sp.coo_matrix((np.ones(len(a)), (a, b)), shape=(a.max() + 1, b.max() + 1)).tocsr()
+    n.sum_duplicates()
+    return n, np.bincount(a), np.bincount(b)
+
+
+def jaccard_best_match(a, b):
+    """(per cluster of a, per cluster of b): each cluster's Jaccard index |A ∩ B| / |A ∪ B| with
+    its best-matching cluster in the other partition (as in clusterboot). Integer codes."""
+    n, sa, sb = _contingency(a, b)
+    c = n.tocoo()
+    j = c.data / (sa[c.row] + sb[c.col] - c.data)
+    best_a = np.zeros(len(sa))
+    np.maximum.at(best_a, c.row, j)
+    best_b = np.zeros(len(sb))
+    np.maximum.at(best_b, c.col, j)
+    return best_a, best_b
+
+
+def jaccard(a, b):
+    """Symmetric best-match Jaccard: the mean over clusters (unweighted: every cluster counts
+    the same, however small) in each direction, averaged over the two directions."""
+    ja, jb = jaccard_best_match(a, b)
+    return float((ja.mean() + jb.mean()) / 2)
+
+
+def modularity(graph, labels, resolution=1.0):
+    """Weighted Newman modularity of a partition of an undirected graph, at a resolution
+    (the Reichardt-Bornholdt / RB-configuration objective leidenalg, igraph and cuGraph use).
+
+    The objective every Leiden module here maximises on the same connectivities, so
+    comparing it across implementations says whether one finds worse partitions or
+    only different, equally good ones. graph: symmetric CSR; labels: integer codes.
+    Q = sum over clusters of (weight inside / 2m) - resolution * (degree of cluster / 2m)^2.
+    """
+    c = graph.tocoo()
+    two_m = c.data.sum()
+    labels = np.asarray(labels)
+    k = labels.max() + 1
+    same = labels[c.row] == labels[c.col]
+    inside = np.bincount(labels[c.row[same]], weights=c.data[same], minlength=k)
+    degree = np.bincount(labels, weights=np.asarray(graph.sum(axis=1)).ravel(), minlength=k)
+    return float(inside.sum() / two_m - resolution * np.sum((degree / two_m) ** 2))
 
 
 def nmi(a, b):

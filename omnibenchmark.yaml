@@ -1,4 +1,5 @@
 # Entrypoints for this repository's own modules, referenced from benchmark.yaml.
 entrypoints:
   hao_input: modules/hao_input.py
+  dataset_input: modules/dataset_input.py   # Phase 2: any labelled .h5ad -> nested, label-stratified subsample
   stage: modules/stage.sh   # run a module's script (--module <url>@<commit> --script <file>) under denet

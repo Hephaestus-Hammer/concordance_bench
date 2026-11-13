@@ -36,7 +36,7 @@ from obkit import prof
 STAGE_OF_OUTPUT = {"embedding_tsv": "pca", "neighbors_h5": "knn", "clusters_tsv": "cluster",
                    "rawdata_clusters_truth": "input"}
 FIELDS = ["s", "max_rss", "cpu_time", "peak_cores", "max_threads", "gpu_util_mean", "gpu_util_max",
-          "gpu_mem_peak_mb", "source"]
+          "gpu_mem_peak_mb", "source", "t0_ms"]  # t0_ms: job start (denet), NaN without a trace
 PHASE_FIELDS = ["start_s", "duration_s", "cpu_s", "mean_cores", "peak_cores", "peak_rss_mb", "gpu_util_mean",
                 "gpu_mem_peak_mb", "samples"]
 
@@ -53,7 +53,8 @@ def read_performance(path):
     rec = prof.load_snakemake_benchmark(path)
     if rec is None:
         return None
-    return {**{k: _nan(rec.get(k)) for k in ("s", "max_rss", "cpu_time")}, "source": "snakemake"}
+    return {**{k: _nan(rec.get(k)) for k in ("s", "max_rss", "cpu_time")}, "source": "snakemake",
+            "t0_ms": np.nan}
 
 
 def read_denet(path):
@@ -73,7 +74,7 @@ def read_denet(path):
                "peak_cores": tot["peak_cores"], "max_threads": _nan(tot["peak_threads"]),
                "gpu_util_mean": tot["gpu_util_mean"],
                "gpu_util_max": float(gpu_util.max()) if gpu_util.notna().any() else np.nan,
-               "gpu_mem_peak_mb": tot["gpu_mem_peak_mb"], "source": "denet"}
+               "gpu_mem_peak_mb": tot["gpu_mem_peak_mb"], "source": "denet", "t0_ms": trace["t0_ms"]}
     return trace, summary, d[["t", "cores", "mem_rss_kb", "thread_count", "gpu_util"]]
 
 
@@ -120,7 +121,7 @@ def runtimes(df):
             continue
         node = r["nodes"][-1]
         stage = STAGE_OF_OUTPUT.get(r["output"], node.stage)
-        job = {"size": r["size"], "stage": stage, "module": node.module,
+        job = {"size": r["size"], "dir": str(node_dir), "stage": stage, "module": node.module,
                "settings": ", ".join(f"{k}={v}" for k, v in node.settings),
                "seed": ", ".join(f"{k}={v}" for k, v in node.seeds), "pipeline": r["label"]}
         rows.append({**job, **{k: rec.get(k, np.nan) for k in FIELDS}})
@@ -128,7 +129,7 @@ def runtimes(df):
             series[(r["size"], stage, r["label"])] = ser
         for ph in read_phases(node_dir, trace):
             phase_rows.append({**job, "phase": ph["event"], **{k: _nan(ph.get(k)) for k in PHASE_FIELDS}})
-    cols = ["size", "stage", "module", "settings", "seed", "pipeline"]
+    cols = ["size", "dir", "stage", "module", "settings", "seed", "pipeline"]
     return (pd.DataFrame(rows, columns=[*cols, *FIELDS]), series,
             pd.DataFrame(phase_rows, columns=[*cols, "phase", *PHASE_FIELDS]))
 

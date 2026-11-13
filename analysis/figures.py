@@ -9,22 +9,38 @@ import numpy as np
 EPS = 1e-16
 INK, INK_2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 
+# omnicol, the project palette (see CLAUDE.md): colour-blind check with pals::pal.safe. Ordered so
+# the colours drawn first, and the three module pairs of one stage, stay apart under deuteranomaly
+# and protanomaly (orange/yellow and pink/lavender are the closest pairs, so they come late).
+OMNICOL = ["#425fed", "#fa8e1b", "#045207", "#b82033", "#81207e",
+           "#dec03c", "#69b09c", "#cf84b2", "#738c18", "#8584be"]
+
 # What differs between the two runs of a pair. Seed and replicate are the noise
-# floor, so they get neutral greys; stage differences get colours.
+# floor, so they get neutral greys; stage differences get omnicol colours.
 CATEGORY_COLOURS = {
     "replicate": "#b0afab",
     "seed: pca": "#8c8b87",
     "seed: knn": "#6b6a66",
     "seed: cluster": "#3d3c3a",
-    "pca": "#2a78d6",
-    "knn": "#eb6834",
-    "cluster": "#1baf7a",
-    "pca+knn": "#8a5cd6",
-    "pca+cluster": "#c9962a",
-    "knn+cluster": "#d63a7a",
-    "pca+knn+cluster": "#2aa3b3",
+    "pca": "#425fed",
+    "knn": "#fa8e1b",
+    "cluster": "#045207",
 }
-_EXTRA = [c for i, c in enumerate(plt.get_cmap("tab10").colors) if i != 7]  # no grey: grey = noise floor
+
+
+def _tint(hex_colour, f=0.5):
+    """hex_colour mixed with white: lighter, same hue."""
+    rgb = [int(hex_colour[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(c + (255 - c) * f):02x}" for c in rgb)
+
+
+# Multi-stage groups: lighter tints, so they read as secondary to the one-stage module pairs,
+# which take the solid omnicol colours (9 pairs + 4 groups is more than omnicol's 10).
+CATEGORY_COLOURS.update({"pca+knn": _tint("#81207e"), "pca+cluster": _tint("#738c18"),
+                         "knn+cluster": _tint("#b82033"), "pca+knn+cluster": _tint("#425fed")})
+_GREYS = {"replicate": ["#b0afab", "#c8c7c3", "#d9d8d4"], "seed: pca": ["#8c8b87", "#a3a29e"], "seed: knn": ["#6b6a66", "#82817d"],
+          "seed: cluster": ["#3d3c3a", "#5e5d59", "#9a9995"]}
+_EXTRA = OMNICOL  # module-pair groups, in the order first drawn; no grey: grey = noise floor
 
 plt.rcParams.update({
     "font.size": 9, "axes.edgecolor": INK_2, "axes.labelcolor": INK, "text.color": INK,
@@ -41,10 +57,10 @@ STAGE_ORDER = ["pca", "knn", "cluster"]
 def _category_key(c):
     """Noise floors first, then one-stage groups in stage order, then multi-stage groups."""
     head = c.split(":")[0]
-    if c == "replicate":
+    if c.startswith("replicate"):
         return (0, -1, c)
     if c.startswith("seed"):
-        stage = c.split(": ", 1)[-1]
+        stage = c.split(": ", 1)[-1].split(" (")[0]
         return (0, STAGE_ORDER.index(stage) if stage in STAGE_ORDER else 9, c)
     if head in STAGE_ORDER:
         return (1, STAGE_ORDER.index(head), c)
@@ -56,6 +72,7 @@ def categories_in(values):
 
 
 _assigned = {}
+_greys_assigned = {}
 
 
 def colour(category):
@@ -63,8 +80,14 @@ def colour(category):
     palette colours in the order first drawn, so a group keeps one colour across one report."""
     if category in CATEGORY_COLOURS:
         return CATEGORY_COLOURS[category]
-    if category.startswith("seed"):
-        return "#52514e"
+    if category.startswith(("seed", "replicate")):  # one grey per module's noise floor
+        base = category.split(" (")[0]
+        if base not in _GREYS:
+            return "#52514e"
+        if category not in _greys_assigned:
+            n = sum(1 for c in _greys_assigned if c.startswith(base))
+            _greys_assigned[category] = _GREYS[base][n % len(_GREYS[base])]
+        return _greys_assigned[category]
     if category not in _assigned:
         _assigned[category] = _EXTRA[len(_assigned) % len(_EXTRA)]
     return _assigned[category]
@@ -122,6 +145,33 @@ def by_category(pairs, sizes, col, xlabel):
     return fig
 
 
+def quality(q, size):
+    """q: rows with upstream, module, modularity; one row per upstream, one point per run,
+    coloured by Leiden module (the same colours as the Runtime tab), median as a tick."""
+    if not len(q):
+        return None
+    ups = sorted(q["upstream"].unique())
+    mods = sorted(q["module"].unique())
+    fig, ax = plt.subplots(figsize=(7.5, 0.34 * len(ups) + 1.8), constrained_layout=True)
+    rng, labelled = np.random.default_rng(0), set()
+    for y, up in enumerate(ups):
+        for j, m in enumerate(mods):
+            v = q.loc[(q["upstream"] == up) & (q["module"] == m), "modularity"].to_numpy(dtype=float)
+            if not len(v):
+                continue
+            off = (j - (len(mods) - 1) / 2) * 0.24
+            ax.scatter(v, y + off + rng.uniform(-0.07, 0.07, len(v)), s=10, color=_module_colour(m),
+                       edgecolor=SURFACE, linewidth=0.3, alpha=0.85, zorder=3, label=None if m in labelled else m)
+            labelled.add(m)
+            ax.vlines(np.median(v), y + off - 0.1, y + off + 0.1, color=INK, lw=1.2, zorder=4)
+    ax.set_yticks(range(len(ups)), ups, fontsize=7)
+    ax.set(ylim=(len(ups) - 0.5, -0.5), title=size, xlabel="modularity on the clustered graph (higher = better partition)")
+    ax.grid(axis="y", visible=False)
+    fig.legend(frameon=False, fontsize=7, loc="outside lower center", ncol=len(mods),
+               title="Leiden module", title_fontsize=7)
+    return fig
+
+
 def truth_ari(truth, sizes):
     """truth: rows with size, pipeline (seeds merged), column, ari; one point per run."""
     pipelines = sorted(truth["pipeline"].unique())
@@ -135,7 +185,7 @@ def truth_ari(truth, sizes):
             s = sub[sub["column"] == col]
             off = (j - (len(cols) - 1) / 2) * 0.22
             ax.scatter(s["ari"], s["pipeline"].map(y_of) + off, marker=markers[j % 4], s=12,
-                       color=INK_2 if j else "#2a78d6", alpha=0.7, label=col, zorder=3)
+                       color=INK_2 if j else OMNICOL[0], alpha=0.7, label=col, zorder=3)
         ax.set_yticks(range(len(pipelines)), pipelines, fontsize=6.5)
         ax.set(xlabel="ARI against annotation (one point per run)", title=size)
         ax.grid(axis="y", visible=False)
@@ -244,8 +294,8 @@ def _category_legend(fig, order):
                ncol=min(len(order), 5), title="what differs", title_fontsize=7)
 
 
-PHASE_COLOURS = {"load": "#2a78d6", "write": "#1baf7a", "(unphased)": "#b0afab"}
-_PHASE_EXTRA = ["#eb6834", "#8a5cd6", "#c9962a", "#d63a7a", "#2aa3b3"]
+PHASE_COLOURS = {"load": "#425fed", "write": "#045207", "(unphased)": "#b0afab"}
+_PHASE_EXTRA = [c for c in OMNICOL if c not in ("#425fed", "#045207")]
 
 
 def _phase_colour(p, cache={}):

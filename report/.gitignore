@@ -1,0 +1,8 @@
+# rendered output (pixi run report2 writes to results/phase2/)
+phase2.html
+phase2_files/
+*.ipynb
+*.quarto_ipynb
+
+/.quarto/
+**/*.quarto_ipynb

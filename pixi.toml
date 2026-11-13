@@ -17,6 +17,11 @@ h5py = "*"
 matplotlib = "*"
 pyyaml = "*"
 denet = "==0.10.3"          # per-job CPU/memory/GPU traces
+pytest = ">=8"              # tests/ (modules/ and analysis/)
+quarto = ">=1.6"            # report/phase2.qmd (Phase 2 report)
+ipykernel = "*"             # quarto's Python cells
+nbclient = "*"
+nbformat = "*"
 
 [pypi-dependencies]
 omnibenchmark = "==0.7.0"              # the `ob` CLI; pinned because its CLI changes between releases
@@ -29,6 +34,10 @@ CONDA_PKGS_DIRS = "$PIXI_PROJECT_ROOT/.conda/pkgs"
 
 [tasks]
 validate = "ob validate plan benchmark.yaml"
+test = "python -m pytest -q tests"
+filters = "python scripts/make_filters.py"   # Phase 2 slice filters from benchmark-phase2.yaml
+phase2 = "python analysis/phase2.py --from_out out-phase2 --output_dir results/phase2"   # Phase 2 tables (TSVs): add replicate folders after out-phase2
+report2 = { cmd = "quarto render report/phase2.qmd --output-dir ../results/phase2", env = { PHASE2_RESULTS = "$PIXI_PROJECT_ROOT/results/phase2" } }   # Phase 2 report (HTML)
 dry = "ob run benchmark.yaml --dry"
 report = "python analysis/report.py --from_out out --output_dir results/report"
 # Re-generate envs/<env>.yml from pixi.lock (see "Module environments" below). Run after `pixi lock`.
