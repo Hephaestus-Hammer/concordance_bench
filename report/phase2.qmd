@@ -26,6 +26,8 @@ format:
         .metric .legend { font-size: 0.85rem; color: #444; }
         .metric .legend td { white-space: normal; background: none !important; padding: 1px 8px 1px 0; }
         details > summary { cursor: pointer; color: #425fed; font-size: 0.85rem; margin: 0.2rem 0; }
+        details.p2-metrics { margin: 0.2rem 0 0.8rem; }
+        details.p2-metrics > summary { font-size: 0.9rem; }
         </style>
 execute:
   echo: false
@@ -396,9 +398,13 @@ metric("cost", "Effective cost", "Full pipeline › Trade-off and thresholds",
 metric("tradeoff", "Trade-off score", "Full pipeline › Trade-off and thresholds",
        "One number per pipeline, dataset and size combining the three: accuracy and stability on their "
        "0–1 scales, cost as how many times slower than the cheapest pipeline (log10, so 10× slower "
-       "costs one point). Absolute scales: a pipeline's score does not change when another is added.",
-       r"\mathrm{score} = w_{\mathrm{acc}} \cdot \mathrm{acc} + w_{\mathrm{stab}} \cdot \mathrm{Stab} - w_{\mathrm{cost}} \cdot \log_{10}\frac{C}{C_{\min}}",
+       "costs one point). Stability is multiplied by the mean reproducibility: a deterministic pipeline "
+       "(reproducibility 1) is unaffected, one that gives different answers when re-run with the same "
+       "seed loses stability in proportion. Without replicate folders reproducibility is unknown and the "
+       "factor is 1 (marked †). Absolute scales: a pipeline's score does not change when another is added.",
+       r"\mathrm{score} = w_{\mathrm{acc}} \cdot \mathrm{acc} + w_{\mathrm{stab}} \cdot \mathrm{Stab} \cdot \overline{\mathrm{Rep}} - w_{\mathrm{cost}} \cdot \log_{10}\frac{C}{C_{\min}}",
        [("w", "the weights (sliders): how much each matters to you"),
+        ("\\overline{\\mathrm{Rep}}", "the mean reproducibility over same-seed pairs (1 if unknown)"),
         ("C_{\\min}", "the cheapest pipeline's effective cost at that dataset and size")],
        "higher is better")
 
@@ -457,8 +463,31 @@ metric("worst", "Worst pair", "the tables of Stability and Full pipeline",
        r"\min_{s \neq t} \mathrm{sim}(\text{run}_s, \text{run}_t)", [], "same scale as the measure")
 
 
+def _first_sentence(text):
+    i = text.find(". ")
+    return text if i < 0 else text[:i + 1]
+
+
 def explain(*keys):
-    """The metrics' description, formula and legend, as used in a subtab."""
+    """In a subtab: one collapsed line per metric, opening to a one-sentence summary, the formula
+    and its legend. The full description is the Metrics tab's."""
+    names = ", ".join(M[k]["name"] for k in keys)
+    raw(f'<details class="p2-metrics"><summary>How these are measured: {html.escape(names)}</summary>')
+    for k in keys:
+        m = M[k]
+        print(f'\n:::: {{.metric}}\n**{m["name"]}.** {_first_sentence(m["what"])} '
+              f'_Full description: Metrics tab._\n\n$${m["formula"]}$$\n')
+        if m["legend"]:
+            print("\n::: {.legend}\n")
+            for a, b in m["legend"]:
+                print(f"- ${a}$: {b}")
+            print("\n:::\n")
+        print("\n::::\n")
+    raw("</details>")
+
+
+def catalogue(*keys):
+    """In the Metrics tab: the full description, formula, legend and scale."""
     for k in keys:
         m = M[k]
         print(f'\n:::: {{.metric}}\n**{m["name"]}.** {m["what"]}\n\n$${m["formula"]}$$\n')
@@ -895,7 +924,7 @@ explain("cost", "tradeoff")
 if len(pipes):
     data = pipes.rename(columns={"subsample": "size"})[
         ["res_key", "dataset", "size", "cells", "pipeline", "accuracy_share", "accuracy_jaccard", "stability",
-         "stability_jaccard", "cost_s", "mem_gb"]]
+         "stability_jaccard", "reproducibility_mean", "reproducibility_jaccard_mean", "cost_s", "mem_gb"]]
     data = json.loads(data.to_json(orient="records"))
     raw("""
 <div class="p2-sliders">
@@ -907,10 +936,10 @@ the Jaccard with the labels and stability the Jaccard between seeds. Best per ro
 <label>w<sub>cost</sub> <input type="range" id="w-cost" min="0" max="3" step="0.25" value="1"> <span></span></label>
 <div id="p2-trade" class="tbl"></div>
 <p><b>Fastest pipeline meeting both thresholds</b> (lowest effective cost C, no weights): accuracy
-within the chosen margin of the best pipeline at that dataset and size, and stability at least the
-chosen value.</p>
+within the chosen margin of the best pipeline at that dataset and size, and stability × mean
+reproducibility at least the chosen value.</p>
 <label>accuracy within <input type="range" id="t-acc" min="0" max="25" step="1" value="5"> <span></span></label>
-<label>stability ≥ <input type="range" id="t-stab" min="0.5" max="1" step="0.01" value="0.9"> <span></span></label>
+<label>stability × reproducibility ≥ <input type="range" id="t-stab" min="0.5" max="1" step="0.01" value="0.9"> <span></span></label>
 <div id="p2-thresh" class="tbl"></div>
 </div>
 <script>
@@ -934,7 +963,11 @@ chosen value.</p>
     const key = window.p2res ? window.p2res() : "oracle";
     const jac = (window.p2measure ? window.p2measure() : "ari") === "jaccard";
     const acc = r => jac ? r.accuracy_jaccard : r.accuracy_share;
-    const stab = r => jac ? r.stability_jaccard : r.stability;
+    const rep = r => { const v = jac ? r.reproducibility_jaccard_mean : r.reproducibility_mean;
+                       return (v === null || v === undefined || !isFinite(v)) ? null : v; };
+    // stability × mean reproducibility; reproducibility unknown (no replicates) counts as 1
+    const stab = r => (jac ? r.stability_jaccard : r.stability) * (rep(r) === null ? 1 : rep(r));
+    const dag = r => rep(r) === null ? "†" : "";
     const B = budgets[+$("w-mem").value];
     const w = {acc: +$("w-acc").value, stab: +$("w-stab").value, cost: +$("w-cost").value};
     const t = {acc: +$("t-acc").value, stab: +$("t-stab").value};
@@ -958,10 +991,13 @@ chosen value.</p>
       const vals = Object.values(score).filter(v => v !== null);
       const best = vals.length ? Math.max(...vals) : null;
       h += "<tr><td>" + g[0].dataset + "</td><td>" + g[0].size + "</td><td>" + g[0].cells + "</td>" +
-           names.map(n => "<td" + (score[n] !== null && score[n] === best ? ' class="best"' : "") + ">" +
-                     fmt(score[n], 3) + "</td>").join("") + "</tr>";
+           names.map(n => { const r = g.find(x => x.pipeline === n);
+                     return "<td" + (score[n] !== null && score[n] === best ? ' class="best"' : "") + ">" +
+                            fmt(score[n], 3) + (r ? dag(r) : "") + "</td>"; }).join("") + "</tr>";
     });
-    $("p2-trade").innerHTML = h + "</tbody></table>";
+    $("p2-trade").innerHTML = h + "</tbody></table>" +
+      (gs.some(g => g.some(r => rep(r) === null)) ?
+        '<p style="font-size:0.8rem;color:#666">† reproducibility unknown (no replicate folders): factor 1.</p>' : "");
     let k = "<table><thead><tr><th>dataset</th><th>size</th><th>cells</th><th>fastest pipeline</th>" +
             "<th>effective cost (s)</th><th>wall time (s)</th><th>peak memory (GB)</th><th>pipelines meeting both</th></tr></thead><tbody>";
     gs.forEach(g => {
@@ -1000,7 +1036,7 @@ for title, keys in groups_:
     print(f"\n### {title}\n")
     for k in keys:
         print(f"\n_Used in: {M[k]['where']}_\n")
-        explain(k)
+        catalogue(k)
 print("\n### Which measure each subtab uses\n")
 print("""
 | | Stability | Concordance | Accuracy | Cost |

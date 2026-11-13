@@ -21,7 +21,8 @@ def t(tmp_path_factory):
     runs = phase2.clustering_table(df)
     runs, bounds = phase2.accuracy(df, runs)
     runs = phase2.add_modularity(df, runs)
-    stab, repro = phase2.stability(runs), phase2.reproducibility(runs)
+    so, ro = phase2.pair_obs(runs, phase2.KEY, True), phase2.pair_obs(runs, phase2.KEY, False)
+    stab, repro = phase2.summarise_pairs(so, phase2.KEY), phase2.summarise_pairs(ro, phase2.KEY)
     rt = phase2.rs.runtimes(df)[0]
     cold = phase2.cold_starts(rt)
     pca, pca_pairs = phase2.pca_stage(df)
@@ -29,7 +30,7 @@ def t(tmp_path_factory):
     pca, knn = phase2.add_cost(pca, rt, cold), phase2.add_cost(knn, rt, cold)
     ans = phase2.answers(runs, rt, cold)
     stages = phase2.stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold)
-    pipes, pipe_runs = phase2.pipelines_summary(phase2.named_pipeline_runs(runs), bounds, stab, repro, ans)
+    pipes, pipe_runs = phase2.pipelines_summary(phase2.named_pipeline_runs(runs), bounds, stab, repro, ans, so, ro)
     return dict(df=df, runs=runs, bounds=bounds, stab=stab, repro=repro, pca=pca, knn=knn,
                 stages=stages, ans=ans, pipes=pipes, pipe_runs=pipe_runs, pca_pairs=pca_pairs,
                 knn_pairs=knn_pairs, rt=rt, cold=cold)
@@ -241,3 +242,10 @@ def test_cpu_time_and_memory_traces(t):
     gpu = tr[tr["module"].str.contains("rapids")]
     assert gpu["gpu_gb"].max() > 0 and tr[~tr["module"].str.contains("rapids")]["gpu_gb"].isna().all()
     assert (tr["cores"] == 1.0).all()  # the fake traces run one core flat out
+
+
+def test_mean_reproducibility_per_pipeline(t):
+    p = _pipe(t, "all-gpu")
+    # cl-rapids is not reproducible across folders in the fake tree; the CPU baseline is
+    assert p["reproducibility_mean"] < 1
+    assert _pipe(t, "baseline")["reproducibility_mean"] == pytest.approx(1.0)

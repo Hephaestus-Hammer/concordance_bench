@@ -716,6 +716,15 @@ def _pick_j(po, d, s, pipeline, res):
     return float(v["jaccard"].median()) if len(v) else np.nan
 
 
+def _mean_pairs(po, d, s, pipeline, res, col):
+    """Mean over the same-seed pairs (reproducibility) of one pipeline, dataset, size and
+    resolution; NaN without replicate folders."""
+    if po is None or not len(po):
+        return np.nan
+    v = po[(po["dataset"] == d) & (po["subsample"] == s) & (po["pipeline"] == pipeline) & (po["resolution"] == res)]
+    return float(v[col].mean()) if len(v) else np.nan
+
+
 def celltype_table(runs, celltypes, ct_rows):
     """Per cell type: its best-match Jaccard with the clusters, median over the group's runs."""
     if not celltypes or not ct_rows:
@@ -834,6 +843,8 @@ def pipelines_summary(named, bounds, stab, repro, ans, stab_obs=None, repro_obs=
                          "reproducibility": _pick(repro, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
                          "stability_jaccard": _pick_j(stab_obs, d, s, pipeline, res),
                          "reproducibility_jaccard": _pick_j(repro_obs, d, s, pipeline, res),
+                         "reproducibility_mean": _mean_pairs(repro_obs, d, s, pipeline, res, "value"),
+                         "reproducibility_jaccard_mean": _mean_pairs(repro_obs, d, s, pipeline, res, "jaccard"),
                          **_run_metrics(at),
                          "cost_s": warm_median(c) if len(c) else np.nan,
                          "cpu_s": warm_median(c, "cpu_s") if len(c) else np.nan,
