@@ -58,6 +58,7 @@ from matplotlib.patches import Patch
 
 sys.path.insert(0, str(Path("../analysis").resolve()))
 import figures as fg  # omnicol and the shared figure style
+import dominance as dm  # the deck's dominance relation
 
 R = Path(os.environ.get("PHASE2_RESULTS", "../results/phase2"))
 
@@ -457,6 +458,22 @@ metric("trace", "Memory and CPU traces", "every Cost subtab",
        "such as a spike while loading, a GPU allocation held throughout, or a single busy core.",
        r"\mathrm{RAM}(t),\; \mathrm{GPU}(t),\; \mathrm{cores}(t)",
        [("\\mathrm{cores}(t)", "CPU use at time t / 100 %: 1 = one core fully busy, 8 = eight")], "")
+metric("dominance", "Dominance (the deck's relation)", "Full pipeline › Dominance, the scatter plots",
+       "Pipeline A dominates B when it is at least as good on all three criteria, each with a stated "
+       "tolerance. Accuracy is a distribution over seeds, so it enters as almost-stochastic dominance: "
+       "A's accuracy ECDF may lie on the wrong side of B's for at most a share τ of the area between "
+       "them. Stability and cost are single numbers, so they enter as box dominance: equal or better "
+       "after rounding down to boxes of δ_s (stability) and δ_c (log cost). Cost is the deck's, peak "
+       "memory × wall time of one answer (GB·s). Almost-stochastic dominance is not transitive by "
+       "construction, so the relation is tested first; only a transitive relation is drawn, as a "
+       "Hasse diagram (an arrow for every 'directly better than'; isolated pipelines are incomparable "
+       "to all others, a result rather than a gap). The front: pipelines nothing dominates.",
+       r"A \succ B \iff \varepsilon(A,B) \le \tau \;\wedge\; \lfloor s_A/\delta_s \rfloor \ge \lfloor s_B/\delta_s \rfloor \;\wedge\; \lfloor \log c_A/\delta_c \rfloor \le \lfloor \log c_B/\delta_c \rfloor,\quad \varepsilon(A,B) = \frac{\int (F_A - F_B)_+\,dt}{\int |F_A - F_B|\,dt}",
+       [("F_A", "the ECDF of A's accuracy over seeds"), ("\\tau", f"{dm.TAU:g}: the tolerated share of the area on the wrong side"),
+        ("s", "stability (median between seeds)"), ("\\delta_s", f"{dm.DELTA_S:g}"),
+        ("c", "cost per answer, GB·s: peak memory × wall time (the whole sweep at the oracle resolution)"),
+        ("\\delta_c", "log 1.25: costs within a factor 1.25 share a box")],
+       "a partial order when transitive; ε(A,B) + ε(B,A) = 1, so τ must stay small")
 metric("worst", "Worst pair", "the tables of Stability and Full pipeline",
        "The lowest agreement among all pairs of seeds: how far an unlucky seed can take you. Shown next "
        "to the median in the tables; the box plots show all pairs.",
@@ -688,6 +705,121 @@ def _pipe_intro(k):
         print(f"Every pipeline at **resolution {k}**; wall time per answer = PCA + kNN + **one** Leiden run.\n")
 
 
+def _arms(k, m, d, size):
+    """The deck's arms for one dataset, size, resolution and measure: accuracy samples (runs),
+    stability, cost = peak GB x wall time per answer."""
+    p = pipes[(pipes["res_key"] == k) & (pipes["dataset"] == d) & (pipes["subsample"] == size)]
+    o = ob("pipeline", "accuracy_share" if m == "ari" else "accuracy_jaccard", k)
+    o = o[(o["dataset"] == d) & (o["subsample"] == size)]
+    arms = {}
+    for _, r in p.iterrows():
+        acc = o.loc[o["group"] == r["pipeline"], "value"].to_numpy()
+        stab = r["stability" if m == "ari" else "stability_jaccard"]
+        cost = r["cost_s"] * r["mem_gb"] if np.isfinite(r.get("mem_gb", np.nan)) else np.nan
+        if len(acc) and np.isfinite(cost):
+            arms[r["pipeline"]] = dict(acc=acc, stab=stab, cost=cost)
+    return arms
+
+
+def _largest(d):
+    b = bounds[bounds["dataset"] == d]
+    return b.loc[b["cells"].idxmax(), "subsample"], int(b["cells"].max())
+
+
+def scatter_trio(k, m):
+    """Two measures at a time, each dataset at its largest size; the front (pipelines nothing
+    dominates under the deck's relation) ringed."""
+    p = pipes[pipes["res_key"] == k]
+    if not len(p):
+        return
+    acc_col, stab_col = ("accuracy_share", "stability") if m == "ari" else ("accuracy_jaccard", "stability_jaccard")
+    trio = [("cost_gbs", stab_col, "cost against stability"), ("cost_gbs", acc_col, "cost against accuracy"),
+            (stab_col, acc_col, "accuracy against stability")]
+    label = {"cost_gbs": "cost per answer (GB·s)", stab_col: f"stability ({MNAME[m]})",
+             acc_col: "accuracy (share of oracle)" if m == "ari" else "accuracy (Jaccard)"}
+    print("\n**Two measures at a time**, each dataset at its largest size. Ringed: the front, pipelines no other "
+          "pipeline dominates (Dominance, below).\n")
+    fig, axes = plt.subplots(len(datasets), 3, figsize=(11.5, 3.1 * len(datasets)), constrained_layout=True,
+                             squeeze=False)
+    for row, d in zip(axes, datasets):
+        size, cells = _largest(d)
+        sub = p[(p["dataset"] == d) & (p["subsample"] == size)].assign(cost_gbs=lambda x: x["cost_s"] * x["mem_gb"])
+        arms = _arms(k, m, d, size)
+        fr = set(dm.front(list(arms), dm.relation(arms))) if arms else set()
+        for ax, (x, y, title) in zip(row, trio):
+            for _, r in sub.iterrows():
+                on = r["pipeline"] in fr
+                ax.scatter(r[x], r[y], s=70 if on else 40, color=PIPE_COLOUR[r["pipeline"]], label=r["pipeline"],
+                           edgecolors="#222" if on else "none", linewidths=1.6 if on else 0, zorder=3)
+            if x == "cost_gbs":
+                ax.set_xscale("log")
+                plain_log(ax.xaxis)
+            ax.set_xlabel(label[x])
+            ax.set_ylabel(label[y])
+            ax.set_title(f"{d} · {cells / 1000:g}k · {title}", loc="left", fontsize=8)
+    h, l = axes[0][0].get_legend_handles_labels()
+    keep = {lab: hh for hh, lab in zip(h, l)}
+    fig.legend(keep.values(), keep.keys(), loc="outside right center", frameon=False, fontsize=7)
+    show(fig)
+
+
+def dominance_pane(k, m):
+    if not len(pipes[pipes["res_key"] == k]):
+        return
+    _pipe_intro(k)
+    print(f"{MEASURE_NOTE[m]} τ = {dm.TAU:g}, δ_s = {dm.DELTA_S:g}, δ_c = log 1.25.\n")
+    rows, figs = [], []
+    for d in datasets:
+        for size, cells in bounds[bounds["dataset"] == d].sort_values("cells")[["subsample", "cells"]].itertuples(index=False):
+            arms = _arms(k, m, d, size)
+            if len(arms) < 2:
+                continue
+            rel = dm.relation(arms)
+            bad = dm.intransitive(rel)
+            st_ = dm.strict(rel)
+            n = len(arms)
+            ties = sorted({tuple(sorted(e)) for e in rel if (e[1], e[0]) in rel})
+            rows.append({"dataset": d, "size": size, "cells": cells, "pipelines": n,
+                         "pairs ordered": f"{len(st_)} of {n * (n - 1) // 2}",
+                         "ties": ", ".join(f"{a} = {b}" for a, b in ties) or "—",
+                         "front (not dominated)": ", ".join(dm.front(list(arms), rel)),
+                         "transitive": "yes" if not bad else f"no ({bad[0][0]} > {bad[0][1]} > {bad[0][2]})"})
+            if cells == _largest(d)[1]:
+                figs.append((d, cells, arms, rel, bad))
+    if not rows:
+        print("_Too few pipelines with accuracy, stability and cost here._\n")
+        return
+    fig, axes = plt.subplots(1, len(figs), figsize=(max(5.5, 3.8 * len(figs)), 3.6), constrained_layout=True,
+                             squeeze=False)
+    for ax, (d, cells, arms, rel, bad) in zip(axes[0], figs):
+        ax.set_title(f"{d} · {cells / 1000:g}k cells", loc="left")
+        ax.axis("off")
+        if bad:
+            ax.text(0.5, 0.5, "not transitive:\nnot an order, not drawn", ha="center", va="center",
+                    transform=ax.transAxes, color="#b82033", fontsize=9)
+            continue
+        cover = dm.hasse(rel)
+        names = [p_ for p_ in PIPE_ORDER if p_ in arms]
+        lev = dm.levels(names, cover)
+        pos = {}
+        for L in sorted(set(lev.values())):
+            row_ = [n for n in names if lev[n] == L]
+            for i, n in enumerate(row_):
+                pos[n] = ((i + 1) / (len(row_) + 1), 1 - L / (max(lev.values()) + 1 or 1) - 0.1)
+        for a, b in cover:
+            ax.annotate("", xy=pos[b], xytext=pos[a], xycoords="axes fraction",
+                        arrowprops=dict(arrowstyle="-|>", color="#52514e", lw=1.2, shrinkA=14, shrinkB=14))
+        linked = {x for e in cover for x in e}
+        for n in names:
+            ax.scatter(*pos[n], s=420, transform=ax.transAxes, zorder=3, linewidths=1.8,
+                       color=PIPE_COLOUR[n] if n in linked else "white", edgecolors=PIPE_COLOUR[n])
+            ax.text(pos[n][0], pos[n][1] - 0.09, n, ha="center", va="top", fontsize=7, transform=ax.transAxes)
+    show(fig)
+    print("\n_Arrow: directly better than (the Hasse diagram of the strict part). Hollow: incomparable to every "
+          "other pipeline. Pipelines whose boxes and accuracy coincide are ties, listed in the table._\n")
+    table(pd.DataFrame(rows), title="Dominance at every size")
+
+
 def pipeline_pane(k, m):
     if not len(pipes[pipes["res_key"] == k]):
         print("_No pipeline results at this resolution._\n")
@@ -701,6 +833,7 @@ def pipeline_pane(k, m):
         if len(o):
             print(f"\n**{label[0].upper() + label[1:]}**\n")
             boxes(o, f"{label.split(' (')[0]} ({MNAME[m]})", PIPE_COLOUR, order=PIPE_ORDER)
+    scatter_trio(k, m)
 
 
 def pipeline_pane_free(k):
@@ -929,6 +1062,18 @@ else:
     per_res(pipeline_pane_free)
 ```
 
+### Dominance
+
+Which pipelines are better than which, stating only what the data supports: the relation of
+Ben's deck. Follows the resolution slider and the partition-agreement toggle.
+
+```{python}
+#| output: asis
+explain("dominance")
+if len(pipes):
+    per_res(dominance_pane, measured=True)
+```
+
 ### Trade-off and thresholds
 
 ```{python}
@@ -1044,7 +1189,7 @@ groups_ = [("PCA", ["pca_fidelity", "pca_agreement"]), ("kNN", ["knn_recall", "k
            ("Clustering and the final clusters", ["ari", "jaccard", "n_clusters", "accuracy", "celltype", "homcom",
                                                   "modularity", "oracle_res"]),
            ("Across stages", ["stability", "reproducibility", "worst", "downstream", "gap"]),
-           ("Cost", ["wall", "cpu", "memory", "trace", "cost"]), ("Summary", ["tradeoff"])]
+           ("Cost", ["wall", "cpu", "memory", "trace", "cost"]), ("Summary", ["dominance", "tradeoff"])]
 for title, keys in groups_:
     print(f"\n### {title}\n")
     for k in keys:

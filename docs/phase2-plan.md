@@ -218,8 +218,11 @@ count the same thing twice; the weights make that choice visible.
   (`pixi run filters` prints the counts); `--sizes` drops sizes that add nothing new.
 - **Fair CPU comparison.** Most CPU modules use one core; the multithreaded pynndescent
   variant is what keeps "GPU against CPU" from being "GPU against one core".
-- **Reuse, don't reimplement**: Ben's `almost-dominance-perf` code (dominance relation,
-  transitivity check) can be fed the same tables later, as an extra section.
+- **Dominance**: the relation of Ben's deck (almost-stochastic dominance on accuracy, box
+  dominance on stability and log cost, τ = 0.01, δ_s = 0.01, δ_c = log 1.25, cost = GB·s per
+  answer) is in `analysis/dominance.py`, written from the deck's definitions because his
+  `almost-dominance-perf` code was not to hand; swap his functions in once it is. The Full
+  pipeline tab tests transitivity, draws the Hasse diagram and lists the front.
 
 ## Order of work
 
