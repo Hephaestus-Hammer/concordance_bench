@@ -790,6 +790,18 @@ effects of scale, not of drawing other cells.
 ```{python}
 #| output: asis
 folders = runs["run"].fillna("").astype(str).nunique() if len(runs) else 0
+ftab = tsv("folders")
+
+
+def _folder(r):
+    bits = [f"PCA in {r.precision}" if isinstance(r.precision, str) and r.precision else "",
+            r.hardware.replace("_", ", ") if isinstance(r.hardware, str) and r.hardware else ""]
+    bits = [b for b in bits if b]
+    return f"`{r.folder}`" + (f" ({'; '.join(bits)})" if bits else "")
+
+
+if len(ftab):
+    print("**Output folders:** " + ", ".join(_folder(r) for r in ftab.itertuples()) + "\n")
 print(f"**This report:** {len(runs):,} clusterings, {len(datasets)} dataset(s), {len(bounds)} dataset × "
       f"size combinations, {len(RES_KEYS) - 1} resolutions, {folders} output folder(s)"
       f"{' (same-seed replicates: reproducibility is measured)' if folders > 1 else ' (no replicates: no reproducibility yet)'}.\n")

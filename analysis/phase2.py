@@ -921,10 +921,26 @@ def main():
     for name, t in tables.items():
         t.drop(columns=[c for c in drop if c in t.columns and name != "jobs"]).to_csv(
             out / f"phase2_{name}.tsv", sep="\t", index=False)
+    pd.DataFrame({"folder": [Path(f).name for f in args.from_out],
+                  "precision": [_folder_part(f, ("float32", "float64")) for f in args.from_out],
+                  "hardware": [_folder_hardware(f) for f in args.from_out]}).to_csv(
+        out / "phase2_folders.tsv", sep="\t", index=False)
     print(f"wrote {out}/phase2_*.tsv: {len(runs)} clusterings, {len(stages)} stage rows, "
           f"{len(pipes)} named-pipeline rows")
     if not args.no_report:
         render_report(out)
+
+
+def _folder_part(folder, options):
+    name = Path(folder).name
+    return next((o for o in options if o in name.split("_")), "")
+
+
+def _folder_hardware(folder):
+    """The hardware tag scripts/hw_tag.sh put in the folder name (<GPU>_<N>core), if any."""
+    parts = Path(folder).name.split("_")
+    i = next((i for i, x in enumerate(parts) if x.endswith("core") and x[:-4].isdigit()), None)
+    return "_".join(parts[i - 1:i + 1]) if i else ""
 
 
 def render_report(out):

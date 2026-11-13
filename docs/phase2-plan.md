@@ -116,6 +116,24 @@ technology and label quality.
   whole-pipeline replicates are used, a replicate counts as one stage's own only if its
   upstream output is byte-identical (checked by hash).
 
+### Precision and hardware
+
+`scripts/run_phase2.sbatch` runs the whole plan once (three slices, five pipelines, then the
+tables and the report) into a folder named after the PCA precision and the hardware the job
+landed on, `out-phase2_<precision>_<GPU>_<N>core` (`scripts/hw_tag.sh`; `cpu_<N>core` without a
+GPU), with tables and report in `results/phase2_<same>`.
+
+- **float64** (default) runs the plan as it is: every PCA module has `dtype: float64`.
+- **float32** (`PRECISION=float32`) writes `benchmark-phase2-float32.yaml`, the plan with every PCA
+  `dtype: float64` set to `float32`, and its own filters in `filters/phase2-float32/`. The two
+  precisions never share a folder, a filter or a report: put together in one analysis, same-seed
+  runs of the two would be read as replicates.
+- What precision covers: the PCA computation (the matrix is cast before PCA). The embedding is
+  written as text and read back in float64. kNN and Leiden keep their own precision: sklearn
+  brute force, leidenalg and igraph compute in float64; pynndescent, cuML and cuGraph in float32.
+- Same-seed replicates of either: `REP=rep1` adds `_rep1` to the folder; analyse replicate
+  folders of one precision and one hardware together.
+
 ## Metrics
 
 The report is organised by stage. Each stage tab (PCA, kNN, Clustering) has the same four
