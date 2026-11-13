@@ -8,6 +8,11 @@ pipelines (scanpy, rapids) across runs and seeds, plus resource use per job.
 
 - `analysis/` only reads `out/`; it never writes into the ob output tree.
 - `results/` holds only small, committed outputs (summary CSVs, final figures).
+- Figures use the omnicol palette (`OMNICOL` in `analysis/figures.py`) for every
+  categorical colour, in any figure, report or slide: `#b82033 #fa8e1b #dec03c
+  #738c18 #045207 #cf84b2 #425fed #69b09c #81207e #8584be`. Noise floors (seed,
+  replicate) stay grey. Orange/yellow and pink/lavender are the pairs closest
+  under colour blindness: don't put them next to each other for things to compare.
 - Metrics are developed in `analysis/concordance.py` first and become the
   `modules/concordance.py` stage only once proven.
 - Every metric is defined in `docs/metrics.md`; every non-default setting is

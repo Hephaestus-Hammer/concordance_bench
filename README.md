@@ -122,7 +122,17 @@ Results land in `out/` (gitignored), nested by stage, module and parameters.
 
 ```sh
 pixi run report        # every metric and figure in one file: results/report/concordance_report.html
+
+# with same-seed replicates (the same plan run again with ob run --out-dir out-rep1, ...):
+pixi run python analysis/report.py --from_out out out-rep1 out-rep2 --output_dir results/report
 ```
+
+Several output folders are treated as same-seed replicates: runs with the same
+parameters in different folders pair up as `replicate (<module>)`, the run-to-run
+noise at a fixed seed, and every other pair is formed within one folder. The
+Leiden tab tests each pair of implementations against each one's own seed noise
+(a stratified permutation test, `analysis/significance.py`) and gives every
+clustering's modularity on the graph it was clustered on.
 
 The report also writes one TSV per table next to the HTML. It reads `out/` and
 never writes into it. Its Runtime tab shows per job: wall time, mean and peak
@@ -190,7 +200,8 @@ concordance-bench/
 │
 ├── analysis/                  # offline: reads the ob output tree, never writes into it
 │   ├── load.py                #   finds runs in out/: stage, module, parameters, seed
-│   ├── concordance.py         #   PCA |cos| and subspace, kNN overlap, ARI between runs and seeds
+│   ├── concordance.py         #   PCA |cos| and subspace, kNN overlap, ARI between runs and seeds, modularity
+│   ├── significance.py        #   permutation test: each implementation against its own seed noise
 │   ├── resources.py           #   runtime, cores, memory, GPU per job and phase (obkit.prof)
 │   ├── figures.py             #   one function per report figure
 │   └── report.py              #   all of the above in one self-contained HTML file
