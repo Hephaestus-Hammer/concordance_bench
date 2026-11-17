@@ -4,22 +4,27 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=2-00:00:00
-# One Phase 2 run (the three slices and the five pipelines), then its tables and report.
-# The output folder is named after the variant and the hardware the job landed on:
-#   out-phase2_<precision>[_<format>]_<GPU>_<N>core[_<rep>]   e.g. out-phase2_float32_A100-SXM4-80GB_8core
-# and the tables and report go to results/phase2_<same>.
+#SBATCH --time=6-00:00:00
+# Phase 2, REPS times over (default 3): the three slices and the five pipelines into one output
+# folder per replicate, then one set of tables and one report over all of them. Same-seed runs
+# in different folders pair up as replicates, so the report measures reproducibility.
+# The folders are named after the variant and the hardware the job landed on:
+#   out-phase2_<precision>[_<format>]_<GPU>_<N>core_rep<i>   e.g. out-phase2_float32_A100-SXM4-80GB_8core_rep1
+# and the tables and report go to results/phase2_<same, without _rep<i>>.
 #
 #   sbatch scripts/run_phase2.sbatch                          # float64, omni files: the plan as it is
 #   PRECISION=float32 sbatch scripts/run_phase2.sbatch        # every PCA module computes in float32
 #   FORMAT=h5ad-dense SLICES=pca PIPELINES=none sbatch ...    # file format: only PCA reads the matrix
-#   REP=rep1 PRECISION=float32 sbatch scripts/run_phase2.sbatch   # a same-seed replicate folder
+#   REPS=1 sbatch scripts/run_phase2.sbatch                   # one run, no replicates
 #
 # PRECISION  float64 (default) | float32: every PCA `dtype: float64` in the plan set to float32.
 # FORMAT     omni (default) | 10x | h5ad | h5ad-dense: the input modules write the matrix in that
 #            format (modules/matrix_formats.py); needs the input, scanpy-fork and rapids commits
 #            in the plan to be ones that write and read it.
 # SLICES     the slices to run, default "pca knn cluster".  PIPELINES: names, or "none".
+# REPS       replicates, default 3. A folder that already has a finished replicate is kept as it is
+#            (ob skips what is done), so a timed-out job can be resubmitted with the same settings.
+# --time is for 3 replicates; lower it with sbatch --time=... for REPS=1.
 # Anything but the defaults writes its own plan (benchmark-phase2-<variant>.yaml) and filters
 # (filters/phase2-<variant>/), so variants never share a folder, a filter or a report.
 # Run from the repository root.
@@ -48,18 +53,24 @@ else
     pixi run python scripts/make_filters.py --plan "$plan" --out "$filters"
 fi
 
-tag="${variant}_$(bash scripts/hw_tag.sh)${REP:+_$REP}"
-out="out-phase2_${tag}"
+reps="${REPS:-3}"
+[[ "$reps" =~ ^[1-9][0-9]*$ ]] || { echo "REPS: a positive whole number, not $reps" >&2; exit 2; }
+tag="${variant}_$(bash scripts/hw_tag.sh)"
 res="results/phase2_${tag}"
 cores="${SLURM_CPUS_PER_TASK:-8}"
-echo "plan $plan, filters $filters, output $out, results $res"
-
-for s in ${SLICES:-pca knn cluster}; do
-    pixi run ob run "$plan" --filter "$filters/slice-$s.yaml" --out-dir "$out" --cores "$cores" --continue-on-error
+outs=()
+for r in $(seq 1 "$reps"); do
+    out="out-phase2_${tag}_rep${r}"
+    outs+=("$out")
+    echo "replicate $r/$reps: plan $plan, filters $filters, output $out ($(date))"
+    for s in ${SLICES:-pca knn cluster}; do
+        pixi run ob run "$plan" --filter "$filters/slice-$s.yaml" --out-dir "$out" --cores "$cores" --continue-on-error
+    done
+    if [[ "${PIPELINES:-}" != none ]]; then
+        PLAN="$plan" FILTERS="$filters" bash scripts/run_pipelines.sh "$out"
+    fi
 done
-if [[ "${PIPELINES:-}" != none ]]; then
-    PLAN="$plan" FILTERS="$filters" bash scripts/run_pipelines.sh "$out"
-fi
 
-# tables, then the report (phase2.py renders it at the end)
-pixi run python analysis/phase2.py --from_out "$out" --output_dir "$res"
+# tables over every replicate folder, then the report (phase2.py renders it at the end)
+echo "analysis of ${outs[*]} into $res ($(date))"
+pixi run python analysis/phase2.py --from_out "${outs[@]}" --output_dir "$res"

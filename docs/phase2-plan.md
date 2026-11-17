@@ -131,8 +131,10 @@ GPU), with tables and report in `results/phase2_<same>`.
 - What precision covers: the PCA computation (the matrix is cast before PCA). The embedding is
   written as text and read back in float64. kNN and Leiden keep their own precision: sklearn
   brute force, leidenalg and igraph compute in float64; pynndescent, cuML and cuGraph in float32.
-- Same-seed replicates of either: `REP=rep1` adds `_rep1` to the folder; analyse replicate
-  folders of one precision and one hardware together.
+- Same-seed replicates: the script runs the plan `REPS` times (default 3) into
+  `..._rep1`, `..._rep2`, `..._rep3` and analyses them together, so every report measures
+  reproducibility. `REPS=1` for a single run. Only folders of one precision, format and hardware
+  are analysed together.
 
 ### File formats
 
