@@ -12,6 +12,10 @@ each job with a Snakemake benchmark file of known wall time. Effects built in:
   Leiden   resolution sets granularity (0.5 merges pairs, 1 matches the groups, 2 splits them);
            a seed moves 5% of cells; cl-rapids also merges two groups and is not reproducible
            across folders. Upstream noise from an approximate kNN moves 2% more cells.
+  dtype    build(dtype="float32") is the float32 variant for tests/test_precision.py: every PCA
+           module gets a dtype parameter and takes half the time; pc-randomized's last component
+           is another direction, so everything downstream of it changes (other neighbours, other
+           Leiden draws); every other result is identical to float64's.
 """
 
 import hashlib
@@ -33,13 +37,13 @@ BENCH = ("s\th:m:s\tmax_rss\tmax_vms\tmax_uss\tmax_pss\tio_in\tio_out\tmean_load
          "{s:.2f}\t0:00:01\t{m:.1f}\t1\t1\t1\t0\t0\t0\t{s:.2f}\n")
 
 
-def _node(parent, stage, module, params):
+def _node(parent, stage, module, params, time_scale=1.0):
     h = hashlib.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()[:8]
     d = parent / stage / module / f".{h}"
     if not d.exists():
         d.mkdir(parents=True)
         (d / "parameters.json").write_text(json.dumps(params))
-        s = SECS[module if module in SECS else stage]
+        s = SECS[module if module in SECS else stage] * time_scale
         (d / "performance.txt").write_text(BENCH.format(s=s, m=100 + s))
         _denet(d, s, 100 + s, 512 if "rapids" in module else None)
     return d
@@ -113,7 +117,7 @@ def exact_pca(X, k=10):
     return xc @ v, v
 
 
-def build(root, rep=0, n_a=600, n_b=400, small=300):
+def build(root, rep=0, n_a=600, n_b=400, small=300, dtype=None):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     (root / "Snakefile").write_text("")
@@ -134,9 +138,10 @@ def build(root, rep=0, n_a=600, n_b=400, small=300):
             emb_exact, v_exact = exact_pca(X)
 
             def pca(module, seed):
-                d = _node(inp, "pca", module, {"random_seed": seed})
+                params = {"random_seed": seed, **({"dtype": dtype} if dtype else {})}
+                d = _node(inp, "pca", module, params, 0.5 if dtype == "float32" else 1.0)
                 if module == "pc-randomized":   # last component replaced, seed-dependent
-                    r = np.random.default_rng(300 + seed)
+                    r = np.random.default_rng(300 + seed + (500 if dtype == "float32" else 0))
                     v = v_exact.copy()
                     q, _ = np.linalg.qr(np.c_[v_exact, r.normal(size=20)])
                     v[:, -1] = q[:, -1]
@@ -147,7 +152,7 @@ def build(root, rep=0, n_a=600, n_b=400, small=300):
                 emb = (X - X.mean(0)) @ v
                 _tsv(d / f"{module}_embedding.tsv", cells, emb, "cell_id")
                 _tsv(d / f"{module}_loadings.tsv", genes, v, "gene_id")
-                return d, emb
+                return d, emb, module == "pc-randomized" and dtype == "float32"
 
             def knn(pdir, emb, module, seed):
                 d = _node(pdir, "knn", module, {"random_seed": seed})
@@ -165,7 +170,7 @@ def build(root, rep=0, n_a=600, n_b=400, small=300):
                          {"cluster": _clusters(lab, res, s, module == "cl-rapids", 0.02 if approx_knn else 0)},
                          "cell_id")
 
-            pb, eb = pca("pc-baseline", 0)
+            pb, eb, _ = pca("pc-baseline", 0)
             kb, _ = knn(pb, eb, "nn-baseline", 0)
             for s in SEEDS:  # clustering slice (and the baseline pipeline)
                 leiden(kb, False, "cl-baseline", s, 0)
@@ -176,18 +181,18 @@ def build(root, rep=0, n_a=600, n_b=400, small=300):
                 ks, a = knn(pb, eb, "nn-scanpy", s)
                 leiden(ks, a, "cl-baseline", 0, 11 * s)
             for s in SEEDS:  # PCA slice
-                pr, er = pca("pc-randomized", s)
+                pr, er, f32 = pca("pc-randomized", s)
                 k2, _ = knn(pr, er, "nn-baseline", 0)
-                leiden(k2, False, "cl-baseline", 0, 7 * s)
-            pg, eg = pca("pc-rapids", 0)
+                leiden(k2, False, "cl-baseline", 0, 7 * s + 5000 * f32)
+            pg, eg, _ = pca("pc-rapids", 0)
             k3, _ = knn(pg, eg, "nn-baseline", 0)
             leiden(k3, False, "cl-baseline", 0, 0)
             # named pipelines: tuned-cpu, all-gpu, hybrid (matched seeds)
             kg, _ = knn(pg, eg, "nn-rapids", 0)
             for s in SEEDS:
-                pr, er = pca("pc-randomized", s)
+                pr, er, f32 = pca("pc-randomized", s)
                 kt, a = knn(pr, er, "nn-scanpy-mt", s)
-                leiden(kt, a, "cl-baseline", s, 13 * s)
+                leiden(kt, a, "cl-baseline", s, 13 * s + 5000 * f32)
                 leiden(kg, False, "cl-rapids", s, 0)
                 leiden(kg, False, "cl-baseline", s, 0)
     return root

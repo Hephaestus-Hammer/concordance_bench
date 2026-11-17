@@ -180,10 +180,11 @@ def oracle_bounds(embedding, labels, folds=5, seed=0):
     return out[0][0], out[1][0], out[0][1], out[1][1]
 
 
-def accuracy(df, runs, celltypes=None):
+def accuracy(df, runs, celltypes=None, with_bounds=True):
     """Adds ari_truth, jaccard_truth, homogeneity, completeness and clusters (their number) to
     runs; returns (runs, bounds). `celltypes`, a list, gets one row per run and label: the
-    label's best-match Jaccard with the run's clusters (how well that cell type is recovered)."""
+    label's best-match Jaccard with the run's clusters (how well that cell type is recovered).
+    with_bounds=False skips the oracle bounds (cross-validated classifiers: slow at 100k cells)."""
     from sklearn.metrics import homogeneity_completeness_v_measure
 
     runs = runs.copy()
@@ -215,7 +216,7 @@ def accuracy(df, runs, celltypes=None):
             if celltypes is not None:
                 celltypes.extend({"row": i, "label": names[li], "label_cells": int(sizes[li]), "jaccard": float(jt[li])}
                                  for li in range(len(names)))
-        if any(b["dataset"] == dataset and b["subsample"] == subsample for b in bounds):
+        if not with_bounds or any(b["dataset"] == dataset and b["subsample"] == subsample for b in bounds):
             continue  # one bound per dataset and size, from the first folder
         e = emb_rows[[n[0].module == dataset and n[1].module == subsample and n[-1].module == BASELINE["pca"]
                       for n in emb_rows["nodes"]]]

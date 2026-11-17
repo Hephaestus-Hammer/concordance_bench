@@ -1,0 +1,342 @@
+---
+title: "concordance-bench · PCA precision"
+subtitle: "float32 against float64 PCA: what changes beyond replicate noise, stage by stage"
+format:
+  html:
+    embed-resources: true
+    page-layout: full
+    theme: default
+    html-math-method: mathml
+    include-in-header:
+      text: |
+        <style>
+        table { font-size: 0.8rem; border-collapse: collapse; }
+        td, th { padding: 2px 8px; white-space: nowrap; text-align: left; }
+        th { border-bottom: 1px solid #999; }
+        tr:nth-child(even) td { background: #f6f6f4; }
+        td.flag { font-weight: bold; color: #b82033; }
+        .tbl { overflow-x: auto; margin: 0.5rem 0 1rem; }
+        details > summary { cursor: pointer; color: #425fed; font-size: 0.85rem; margin: 0.2rem 0; }
+        .metric { border-left: 3px solid #425fed; padding: 0.2rem 0 0.2rem 0.9rem; margin: 0.6rem 0 1rem; }
+        </style>
+execute:
+  echo: false
+  warning: false
+jupyter: python3
+---
+
+```{python}
+# Reads analysis/precision.py's TSVs from $PRECISION_RESULTS (default ../results/precision).
+# Render: analysis/precision.py renders it at the end, or
+#   PRECISION_RESULTS=<dir> quarto render report/precision.qmd --output-dir <dir>
+import base64
+import html
+import io
+import os
+import sys
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+import numpy as np
+import pandas as pd
+from matplotlib.patches import Patch
+
+sys.path.insert(0, str(Path("../analysis").resolve()))
+import figures as fg  # omnicol and the shared figure style
+import precision as pr  # tolerances and names
+
+R = Path(os.environ.get("PRECISION_RESULTS", "../results/precision"))
+
+
+def tsv(name):
+    p = R / f"precision_{name}.tsv"
+    return pd.read_csv(p, sep="\t", dtype={"res_key": str}) if p.exists() else pd.DataFrame()
+
+
+folders, pairs, agree, acc, cost = (tsv(n) for n in ("folders", "pairs", "agreement", "accuracy", "cost"))
+if not len(agree):
+    raise RuntimeError(f"no precision_agreement.tsv in {R}: run analysis/precision.py first")
+
+CROSS, FLOOR = fg.OMNICOL[0], "#9a9995"
+FLAG = "#b82033"
+LEVEL = {"pca": "PCA", "knn": "kNN", "cluster": "Leiden"}
+MEASURE = {"pca_agreement": "PCA agreement", "knn_shared": "shared neighbours", "ari": "ARI", "jaccard": "Jaccard"}
+NAMED = list(pr.p2.PIPELINES)
+datasets = sorted(agree["dataset"].unique())
+
+
+def raw(s):
+    print(f"\n```{{=html}}\n{s}\n```\n")
+
+
+def show(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=85)
+    plt.close(fig)
+    raw(f'<img src="data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}" style="max-width:100%">')
+
+
+def table(df, digits=3, title="Table", flags=()):
+    """A DataFrame as an HTML table folded under a summary; `flags` columns in red where True."""
+    def cell(c, v):
+        if c in flags:
+            return '<td class="flag">yes</td>' if v is True or v == "True" else "<td>no</td>" if v in (False, "False") else "<td>—</td>"
+        if isinstance(v, (float, np.floating)):
+            return "<td>—</td>" if not np.isfinite(v) else f"<td>{v:.{digits}f}</td>"
+        return f"<td>{html.escape(str(v))}</td>"
+    head = "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns)
+    body = "".join("<tr>" + "".join(cell(c, v) for c, v in zip(df.columns, row)) + "</tr>"
+                   for row in df.itertuples(index=False))
+    raw(f'<details><summary>{html.escape(title)}</summary><div class="tbl"><table><thead><tr>{head}</tr></thead>'
+        f'<tbody>{body}</tbody></table></div></details>')
+
+
+def order(groups):
+    g = list(dict.fromkeys(groups))
+    return [x for x in NAMED if x in g] + sorted(x for x in g if x not in NAMED)
+
+
+def flagged(s):
+    return s.astype(str) == "True"
+
+
+def agreement_boxes(p, flags, ylabel):
+    """Per dataset: per group, the cross pairs (colour) beside the replicate floor (grey), every
+    pair a point, all sizes together; a group whose cross median is beyond noise at any size is
+    labelled in red (`flags`: (dataset, group) pairs)."""
+    if not len(p):
+        print("\n_Nothing to show here._\n")
+        return
+    groups = order(p["group"])
+    fl = set(flags)
+    fig, axes = plt.subplots(1, len(datasets), figsize=(min(18, max(6.5, 0.75 * len(groups) * len(datasets) + 2)), 3.6),
+                             sharey=True, constrained_layout=True, squeeze=False)
+    rng = np.random.default_rng(0)
+    for ax, d in zip(axes[0], datasets):
+        sub = p[p["dataset"] == d]
+        for i, g in enumerate(groups):
+            for j, (kind, col) in enumerate((("cross", CROSS), ("floor", FLOOR))):
+                v = sub[(sub["group"] == g) & sub["kind"].str.startswith(kind)]["value"].dropna().to_numpy()
+                if not len(v):
+                    continue
+                pos = i - 0.18 + 0.36 * j
+                ax.boxplot([v], positions=[pos], widths=0.3, patch_artist=True, showfliers=False,
+                           medianprops={"color": col, "lw": 1.6}, boxprops={"facecolor": col + "33", "edgecolor": col},
+                           whiskerprops={"color": col}, capprops={"color": col})
+                ax.scatter(pos + rng.uniform(-0.1, 0.1, len(v)), v, s=7, color=col, alpha=0.7, zorder=3, linewidths=0)
+        ax.set_xticks(range(len(groups)), groups, rotation=30, ha="right", fontsize=7)
+        for lab in ax.get_xticklabels():
+            if (d, lab.get_text()) in fl:
+                lab.set_color(FLAG)
+                lab.set_fontweight("bold")
+        ax.set_title(d, loc="left")
+        ax.grid(axis="x", visible=False)
+    axes[0][0].set_ylabel(ylabel)
+    fig.legend(handles=[Patch(facecolor=CROSS + "33", edgecolor=CROSS, label="float32 vs float64"),
+                        Patch(facecolor=FLOOR + "33", edgecolor=FLOOR, label="replicates (floor)")],
+               loc="outside right center", frameon=False, fontsize=7)
+    show(fig)
+
+
+# oracle resolution of each float64 pipeline: the Leiden comparisons are shown there
+oracle = acc[acc["res_key"] == "oracle"][["dataset", "subsample", "group", "resolution_float64"]] if len(acc) else pd.DataFrame()
+
+
+def at_oracle(t):
+    if not len(oracle):
+        return t
+    m = t.merge(oracle, on=["dataset", "subsample", "group"], how="inner")
+    return m[np.isclose(m["resolution"], m["resolution_float64"])].drop(columns=["resolution_float64"])
+
+
+FLAGGED = {}
+for (lv, ms), g in agree.groupby(["level", "measure"]):
+    g = at_oracle(g) if lv == "cluster" else g
+    FLAGGED[(lv, ms)] = list(zip(g.loc[flagged(g["beyond_noise"]), "dataset"],
+                                               g.loc[flagged(g["beyond_noise"]), "group"]))
+```
+
+```{python}
+#| output: asis
+tags = ", ".join(f"`{r.folder}` ({r.precision})" for r in folders.itertuples())
+n = folders.groupby("precision").size()
+print(f"**Folders:** {tags}.\n")
+print(f"**Replicates:** {n.get('float64', 0)} float64, {n.get('float32', 0)} float32. Only the PCA computes in the "
+      f"chosen precision; kNN and Leiden keep their own (sklearn, leidenalg and igraph in float64; pynndescent, "
+      f"cuML and cuGraph in float32), so everything downstream changes only through the embedding.\n")
+
+lines = []
+for lv in ("pca", "knn", "cluster"):
+    g = agree[agree["level"] == lv]
+    g = at_oracle(g) if lv == "cluster" else g
+    if not len(g):
+        continue
+    f = g[flagged(g["beyond_noise"])]
+    which = ", ".join(sorted({f"{r.group} ({MEASURE[r.measure]})" if lv == "cluster" else r.group
+                              for r in f.itertuples()})) or "none"
+    lines.append(f"- **{LEVEL[lv]}:** {len(f)} of {len(g)} comparisons beyond replicate noise: {which}.")
+if len(acc):
+    a = acc[acc["res_key"] == "oracle"]
+    f = a[flagged(a["ari_beyond_noise"]) | flagged(a["jaccard_beyond_noise"])]
+    lines.append(f"- **Accuracy at the oracle resolution:** {len(f)} of {len(a)} pipeline × dataset × size "
+                 f"medians moved beyond noise" + (": " + ", ".join(sorted(set(f["group"]))) if len(f) else "") + ".")
+if len(cost):
+    f = cost[flagged(cost["wall_s_beyond_noise"])]
+    lines.append(f"- **Wall time:** {len(f)} of {len(cost)} job medians moved beyond noise"
+                 + (": " + ", ".join(sorted({f'{r.module} ×{r.wall_s_ratio:.2f}' for r in f.itertuples()})) if len(f) else "") + ".")
+print("## Summary\n\n" + "\n".join(lines) + "\n")
+raw(f"""<details><summary>How “beyond noise” is decided</summary><div class="metric">
+<p>Every result is paired with its counterpart: the same modules, settings and seeds, computed with the
+other PCA precision (<b>cross</b>). The <b>floor</b> is the same comparison between same-seed replicates of
+one precision: what rerunning alone changes. A deterministic module has a floor of exactly 1.</p>
+<ul>
+<li><b>Agreement</b> (PCA agreement, shared neighbours, ARI, Jaccard): beyond noise when the cross median is
+below the floor's lower quartile by more than {pr.TOL:g}.</li>
+<li><b>Accuracy</b> (ARI and Jaccard against the labels, number of clusters): Δ = median float32 − median
+float64; beyond noise when |Δ| exceeds both {pr.TOL:g} (half a cluster for the count) and the largest spread
+of per-folder medians within either precision.</li>
+<li><b>Cost</b> (wall time, CPU time, peak memory, warm jobs): ratio = median float32 / median float64; beyond
+noise when it is further from 1 than both ×{pr.COST_TOL:g} and the largest max/min ratio of per-folder medians
+within either precision.</li>
+</ul>
+<p>The tolerances are the deck's dominance tolerances (δ<sub>s</sub> = {pr.TOL:g}, δ<sub>c</sub> = log {pr.COST_TOL:g}).
+Leiden comparisons are shown at each pipeline's float64 oracle resolution; the tables hold every resolution.</p>
+</div></details>""")
+```
+
+## PCA
+
+How much of the float64 embedding's variance the float32 embedding's subspace holds, for every PCA
+module and seed. Exact solvers should sit at 1; randomized solvers can move further, since a
+float32 matrix changes their iterations.
+
+```{python}
+#| output: asis
+agreement_boxes(pairs[pairs["level"] == "pca"], FLAGGED.get(("pca", "pca_agreement"), []), "PCA agreement")
+cols = ["dataset", "subsample", "group", "cross_median", "cross_min", "floor_median", "gap", "beyond_noise"]
+table(agree[agree["level"] == "pca"][cols], 4, "PCA agreement, per dataset and size", flags=("beyond_noise",))
+```
+
+## kNN
+
+Shared neighbours per cell between the float32 and float64 graphs. The kNN modules compute in
+their own precision either way: any change comes from the embedding they were given.
+
+```{python}
+#| output: asis
+agreement_boxes(pairs[pairs["level"] == "knn"], FLAGGED.get(("knn", "knn_shared"), []), "shared neighbours")
+table(agree[agree["level"] == "knn"][cols], 4, "Shared neighbours, per dataset and size", flags=("beyond_noise",))
+```
+
+## Leiden
+
+The final clusters of every pipeline, float32 against float64, at the pipeline's float64 oracle
+resolution.
+
+```{python}
+#| output: asis
+lp = at_oracle(pairs[pairs["level"] == "cluster"])
+for ms in ("ari", "jaccard"):
+    print(f"\n### {MEASURE[ms]}\n")
+    agreement_boxes(lp[lp["measure"] == ms], FLAGGED.get(("cluster", ms), []), MEASURE[ms])
+c = agree[(agree["level"] == "cluster")]
+table(c[["measure", "dataset", "subsample", "group", "resolution", "cross_median", "cross_min", "floor_median", "gap",
+         "beyond_noise"]], 4, "Every pipeline and resolution", flags=("beyond_noise",))
+```
+
+## Accuracy
+
+Does float32 move accuracy against the labels? Δ = median float32 − median float64 at each
+precision's own oracle resolution, one point per dataset and size. The grey bar is the noise:
+± the largest spread of per-folder medians within a precision.
+
+```{python}
+#| output: asis
+def delta_plot(a, m, ylabel):
+    a = a[a["res_key"] == "oracle"]
+    if not len(a):
+        print("\n_Nothing to show here._\n")
+        return
+    groups = order(a["group"])
+    fig, axes = plt.subplots(1, len(datasets), figsize=(min(18, max(6.5, 0.6 * len(groups) * len(datasets) + 2)), 3.4),
+                             sharey=True, constrained_layout=True, squeeze=False)
+    for ax, d in zip(axes[0], datasets):
+        sub = a[a["dataset"] == d]
+        sizes = sorted(sub["subsample"].unique())
+        for i, g in enumerate(groups):
+            for j, s in enumerate(sizes):
+                r = sub[(sub["group"] == g) & (sub["subsample"] == s)]
+                if not len(r):
+                    continue
+                r = r.iloc[0]
+                x = i - 0.25 + 0.5 * (j + 0.5) / len(sizes)
+                nz = r[f"{m}_noise"]
+                if np.isfinite(nz):
+                    ax.plot([x, x], [-nz, nz], color=FLOOR, lw=4, alpha=0.4, solid_capstyle="butt")
+                fl = str(r[f"{m}_beyond_noise"]) == "True"
+                ax.scatter([x], [r[f"{m}_delta"]], s=18, color=FLAG if fl else CROSS, zorder=3)
+        ax.axhline(0, color="#555", lw=0.8)
+        ax.set_xticks(range(len(groups)), groups, rotation=30, ha="right", fontsize=7)
+        ax.set_title(d, loc="left")
+        ax.grid(axis="x", visible=False)
+    axes[0][0].set_ylabel(ylabel)
+    show(fig)
+
+
+delta_plot(acc, "ari", "Δ ARI (float32 − float64)")
+delta_plot(acc, "jaccard", "Δ Jaccard (float32 − float64)")
+table(acc[["dataset", "subsample", "group", "res_key", "resolution_float64", "resolution_float32",
+           "ari_float64", "ari_float32", "ari_delta", "ari_noise", "ari_beyond_noise",
+           "jaccard_delta", "jaccard_beyond_noise", "n_clusters_float64", "n_clusters_float32",
+           "n_clusters_beyond_noise"]], 4, "Accuracy and number of clusters, every resolution",
+      flags=("ari_beyond_noise", "jaccard_beyond_noise", "n_clusters_beyond_noise"))
+```
+
+## Cost
+
+What float32 saves: the warm median of every job, float32 / float64, one point per dataset and
+size (log scale; below 1 is cheaper). The grey bar spans the noise, the largest max/min ratio of
+per-folder medians within a precision.
+
+```{python}
+#| output: asis
+def ratio_plot(col, ylabel):
+    if not len(cost):
+        print("\n_Nothing to show here._\n")
+        return
+    stages = [s for s in ("pca", "knn", "cluster") if s in set(cost["stage"])]
+    fig, axes = plt.subplots(1, len(stages), figsize=(min(18, 4.5 * len(stages)), 3.4), sharey=True,
+                             constrained_layout=True, squeeze=False)
+    for ax, st in zip(axes[0], stages):
+        sub = cost[cost["stage"] == st]
+        mods = sorted(sub["module"].unique())
+        for i, m in enumerate(mods):
+            rs_ = sub[sub["module"] == m].reset_index(drop=True)
+            for j, r in rs_.iterrows():
+                x = i - 0.3 + 0.6 * (j + 0.5) / len(rs_)
+                nz = r[f"{col}_noise"]
+                if np.isfinite(nz) and nz > 0:
+                    ax.plot([x, x], [1 / nz, nz], color=FLOOR, lw=4, alpha=0.4, solid_capstyle="butt")
+                fl = str(r[f"{col}_beyond_noise"]) == "True"
+                if np.isfinite(r[f"{col}_ratio"]) and r[f"{col}_ratio"] > 0:
+                    ax.scatter([x], [r[f"{col}_ratio"]], s=18, color=FLAG if fl else CROSS, zorder=3)
+        ax.axhline(1, color="#555", lw=0.8)
+        for y in (pr.COST_TOL, 1 / pr.COST_TOL):
+            ax.axhline(y, color="#555", lw=0.6, ls=":")
+        ax.set_yscale("log")
+        ax.yaxis.set_major_locator(mticker.LogLocator(subs=(1.0, 2.0, 5.0)))
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:g}"))
+        ax.yaxis.set_minor_formatter(mticker.NullFormatter())
+        ax.set_xticks(range(len(mods)), mods, rotation=30, ha="right", fontsize=7)
+        ax.set_title(LEVEL[st], loc="left")
+        ax.grid(axis="x", visible=False)
+    axes[0][0].set_ylabel(ylabel)
+    show(fig)
+
+
+for col, lab in pr.COST.items():
+    print(f"\n### {lab[0].upper() + lab[1:]}\n")
+    ratio_plot(col, f"float32 / float64, {lab}")
+table(cost, 3, "Every job median", flags=tuple(c for c in cost.columns if c.endswith("beyond_noise")))
+```
