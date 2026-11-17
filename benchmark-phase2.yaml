@@ -57,7 +57,7 @@ stages:
     modules:
       - id: in-5k
         software_environment: scanpy
-        repository: &input {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: 26e92dab250548e5d66bc105b2611f49bd579cb0, entrypoint: dataset_input}
+        repository: &input {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: c61736c9203bad3a0203add416ffe4e4594622a0, entrypoint: dataset_input}
         parameters:
           - {n_cells: 5000, replicate: 0}
       - id: in-10k
@@ -98,7 +98,7 @@ stages:
         resources: {cores: 1, mem_mb: 16000}
         repository: &stage {url: https://github.com/Hephaestus-Hammer/concordance_bench, commit: 1e341e1afaba453e6ee46511609f86d06aed9105, entrypoint: stage}
         parameters:
-          - {module: &m_fork "https://github.com/Hephaestus-Hammer/scanpy@0bfc35e282cc40c5bc6a8497de361e8b18f7ea55", script: pca.py, solver: covariance_eigh, n_components: 50, dtype: float64, blas_threads: 1, random_seed: 0}
+          - {module: &m_fork "https://github.com/Hephaestus-Hammer/scanpy@9dd05b3a882128f9a01104e8da2ec697e8d9019f", script: pca.py, solver: covariance_eigh, n_components: 50, dtype: float64, blas_threads: 1, random_seed: 0}
       - id: pc-scanpy
         name: "scanpy defaults: PCA (arpack)"
         software_environment: scanpy
@@ -126,7 +126,7 @@ stages:
         resources: {cores: 2, mem_mb: 16000}
         repository: *stage
         parameters:
-          - {module: &m_rapids "https://github.com/omni-scrna/rapids-singlecell@29b6614ca06b7aefb2d475377b5600f9dcd6fd64", script: pca.py, solver: covariance-eigh, n_components: 50, dtype: float64, random_seed: 0}
+          - {module: &m_rapids "https://github.com/Hephaestus-Hammer/rapids-singlecell@1d2ff7633cbce50d30624b0ceb45928cc30aebcf", script: pca.py, solver: covariance-eigh, n_components: 50, dtype: float64, random_seed: 0}
       - id: pc-rapids-randomized
         name: "rapids-singlecell PCA, randomized (Halko, GPU)"
         software_environment: rapids

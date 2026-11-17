@@ -7,14 +7,14 @@ picks:
     '*': all
   pca:
     pc-randomized:
-    - 0cc23872
+    - 4cf8c07f
   knn:
     nn-scanpy-mt:
-    - 4de22c35
+    - e575ef72
   cluster:
     cl-baseline:
-    - 4516b9ab
-    - 057f97eb
-    - 1621e007
-    - 5ac562ad
-    - '20699970'
+    - 4bd2f332
+    - f98fcd17
+    - '83613724'
+    - 11dbeea5
+    - 15fb79c7
