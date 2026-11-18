@@ -24,10 +24,11 @@ docs/phase2-plan.md's; in short:
                     resolution, so a worse PCA or kNN cannot be rescued by another resolution;
                     the Clustering tab and the named pipelines use their own.
   cost              wall time: of a stage's own job in the stage tabs; per answer for the named
-                    pipelines: at a fixed resolution PCA + kNN + one Leiden run, at "oracle" PCA
-                    + kNN + Leiden at every resolution of the sweep (choosing the best needs them
-                    all). The first rapids job of a module in a folder is a cold start: flagged,
-                    and left out of medians where there are others.
+                    pipelines always the whole sweep, PCA + kNN + Leiden at every resolution,
+                    whatever resolution the accuracy is read at: running a pipeline means
+                    sweeping the resolution, so that is what choosing one costs. The first
+                    rapids job of a module in a folder is a cold start: flagged, and left out of
+                    medians where there are others.
   concordance       between two implementations: the median agreement between their runs
                     against each one's own seed floor (median agreement between its own runs);
                     gap = floor - between. No significance tests.
@@ -60,7 +61,7 @@ Outputs (phase2_<name>.tsv):
                             pipeline, dataset, size and res_key
   traces                    memory (RAM and GPU, GB) and cores busy over time of one representative job per
                             module (the median wall time) at each dataset's largest size
-  time                      where a named pipeline's time goes: per dataset, size and res_key, the median
+  time                      where a named pipeline's time goes (the whole sweep): per dataset and size, the median
                             seconds of each segment (startup, gpu_transfer, pca, knn, cluster; io, the
                             load and write phases, listed but left out of the total), from the modules'
                             obkit phases over their denet traces
@@ -619,10 +620,11 @@ def job_segments(rt, ph):
 
 
 def time_breakdown(named, rt, ph, cold, bounds):
-    """Per named pipeline, dataset, size and res_key: the median seconds of each segment over
-    the pipeline's answers (PCA + kNN + Leiden: one run at a fixed resolution, the whole sweep
-    for "oracle"), cold starts left out where there are others. Long format: one row per segment,
-    io included for reference (not part of the bar)."""
+    """Per named pipeline, dataset and size: the median seconds of each segment over the
+    pipeline's answers, each the whole sweep (PCA + kNN + Leiden at every resolution, as a
+    pipeline is run), cold starts left out where there are others. res_key "*": the same at
+    every resolution. Long format: one row per segment, io included for reference (not part of
+    the bar)."""
     if not len(named):
         return pd.DataFrame()
     segs = job_segments(rt, ph)
@@ -630,8 +632,7 @@ def time_breakdown(named, rt, ph, cold, bounds):
     key = ["dataset", "subsample", "named", "pca_seed", "knn_seed", "cluster_seed", "run"]
     answers_ = []
     for k, g in named.groupby(key, dropna=False):
-        choices = [(ORACLE, g)] + [(res_key(r), gr) for r, gr in g.groupby("resolution")]
-        for rk, gr in choices:
+        for rk, gr in (("*", g),):
             dirs = [g["pca_dir"].iloc[0], g["knn_dir"].iloc[0], *gr["cluster_dir"]]
             if any(d not in segs for d in dirs):
                 continue
@@ -881,8 +882,9 @@ def named_pipeline_runs(runs):
 
 
 def pipelines_summary(named, bounds, stab, repro, ans, stab_obs=None, repro_obs=None, obs=None, ct_rows=None):
-    """Named pipeline x dataset x size x res_key. At a fixed resolution the cost of an answer is
-    PCA + kNN + one Leiden run; at "oracle" the whole sweep, since choosing needs every run."""
+    """Named pipeline x dataset x size x res_key. The cost of an answer is always the whole sweep
+    (PCA + kNN + Leiden at every resolution): a pipeline is run with a resolution sweep, so
+    that is its cost at whatever resolution its accuracy is read."""
     b = bounds.set_index(["dataset", "subsample"]) if len(bounds) else pd.DataFrame()
     grid = sorted(named["resolution"].dropna().unique()) if len(named) else []
     rows, at_res = [], []
@@ -897,7 +899,7 @@ def pipelines_summary(named, bounds, stab, repro, ans, stab_obs=None, repro_obs=
             at = g[g["resolution"] == res]
             if not len(at):
                 continue
-            c = a[a["scope"] == "sweep"] if key == ORACLE else a[(a["scope"] == "single") & (a["resolution"] == res)]
+            c = a[a["scope"] == "sweep"]  # the whole sweep, at every res_key
             if obs is not None:
                 cells = b.at[(d, s), "cells"] if (d, s) in b.index else np.nan
                 base = {"tab": "pipeline", "group": name, "dataset": d, "subsample": s, "cells": cells, "res_key": key}

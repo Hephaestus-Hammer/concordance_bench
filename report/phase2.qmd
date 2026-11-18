@@ -426,11 +426,12 @@ metric("oracle_res", "Oracle resolution", "every resolution dropdown",
 metric("wall", "Wall time", "every Cost subtab",
        "Elapsed time of a job from start to end, start-up and imports included, queue excluded, with "
        "empty compilation caches (each job compiles what it needs, as on a first run). Per answer "
-       "(Full pipeline): the stages one after another; at a fixed resolution one Leiden run, at the "
-       "oracle resolution every resolution of the sweep, since choosing needs them all. The first "
+       "(Full pipeline): the stages one after another, with Leiden at every resolution of the sweep, "
+       "whatever resolution the accuracy is read at: a pipeline is run with a resolution sweep, so "
+       "that is what choosing it costs. Stage tabs: one job (one Leiden run in Clustering). The first "
        "rapids job of a module in a folder is a cold start and is left out where there are others.",
        r"T = T_{\mathrm{PCA}} + T_{\mathrm{kNN}} + \sum_{r \in \mathcal{R}} T_{\mathrm{Leiden}}(r)",
-       [("\\mathcal{R}", "one resolution, or the whole sweep at the oracle resolution")],
+       [("\\mathcal{R}", "every resolution of the sweep (Full pipeline)")],
        "seconds; lower is better")
 metric("memory", "Peak memory", "every Cost subtab",
        "The most memory a job held at once, from denet: peak RAM of the job's process tree plus its "
@@ -450,7 +451,7 @@ metric("time_split", "Where the time goes", "Full pipeline: Where the time goes"
        "A job that logs no phases counts whole as its stage's work.",
        r"T' = T_{\mathrm{start}} + T_{\mathrm{GPU\,transfer}} + T_{\mathrm{PCA}} + T_{\mathrm{kNN}} + "
        r"\sum_{r \in \mathcal{R}} T_{\mathrm{Leiden}}(r) = T - T_{\mathrm{load}} - T_{\mathrm{write}}",
-       [("T", "the answer's wall time"), ("\\mathcal{R}", "one resolution, or the whole sweep at the oracle resolution")],
+       [("T", "the answer's wall time"), ("\\mathcal{R}", "every resolution of the sweep")],
        "seconds; share of T′ in the segments")
 
 metric("cost", "Effective cost", "Full pipeline › Trade-off and thresholds",
@@ -542,7 +543,7 @@ metric("dominance", "Dominance (the deck's relation)", "Full pipeline › Domina
        r"A \succ B \iff \varepsilon(A,B) \le \tau \;\wedge\; \lfloor s_A/\delta_s \rfloor \ge \lfloor s_B/\delta_s \rfloor \;\wedge\; \lfloor \log c_A/\delta_c \rfloor \le \lfloor \log c_B/\delta_c \rfloor,\quad \varepsilon(A,B) = \frac{\int (F_A - F_B)_+\,dt}{\int |F_A - F_B|\,dt}",
        [("F_A", "the ECDF of A's accuracy over seeds"), ("\\tau", f"{dm.TAU:g}: the tolerated share of the area on the wrong side"),
         ("s", "stability (median between seeds)"), ("\\delta_s", f"{dm.DELTA_S:g}"),
-        ("c", "cost per answer, GB·s: peak memory × wall time (the whole sweep at the oracle resolution)"),
+        ("c", "cost per answer, GB·s: peak memory × wall time of the whole sweep"),
         ("\\delta_c", "log 1.25: costs within a factor 1.25 share a box")],
        "a partial order when transitive; ε(A,B) + ε(B,A) = 1, so τ must stay small")
 metric("worst", "Worst pair", "the tables of Stability and Full pipeline",
@@ -645,7 +646,7 @@ def time_tab(k, d, size):
     fig, ax = plt.subplots(figsize=(7.5, 3.6), constrained_layout=True)
     _stack(ax, vals, pipes_, pipes_)
     ax.set_ylabel("seconds (load and write left out)")
-    ax.set_title(f"{d} · {int(CELLS.get((d, size), 0)):,} cells · {res_text(k, 'Leiden sweep (oracle)')}", loc="left",
+    ax.set_title(f"{d} · {int(CELLS.get((d, size), 0)):,} cells · Leiden at every resolution", loc="left",
                  fontsize=9)
     ax.legend(*[x[::-1] for x in ax.get_legend_handles_labels()], loc="center left", bbox_to_anchor=(1, 0.5),
               frameon=False, fontsize=8)
@@ -877,11 +878,9 @@ def cost(stage):
 
 
 def _pipe_intro(k):
-    if k == ORACLE:
-        print("Each pipeline at **its own oracle resolution**; wall time per answer = PCA + kNN + Leiden at "
-              "**every** resolution of the sweep, since choosing the best needs them all.\n")
-    else:
-        print(f"Every pipeline at **resolution {k}**; wall time per answer = PCA + kNN + **one** Leiden run.\n")
+    which = "Each pipeline at **its own oracle resolution**" if k == ORACLE else f"Every pipeline at **resolution {k}**"
+    print(f"{which}. Cost per answer is always the **whole sweep** (PCA + kNN + Leiden at every resolution), "
+          "as a pipeline is run.\n")
 
 
 def _arms(k, m, d, size):
@@ -1305,10 +1304,13 @@ else:
     per_res(scatter_trio, measured=True)
     print("\n**Homogeneity, completeness and modularity**\n")
     per_res(lambda k: _quality_pane("pipeline", k, PIPE_COLOUR, order=PIPE_ORDER))
-    for metric, label in (("cost_s", "wall time per answer (s)"), ("cpu_s", "CPU time per answer (core-seconds)"),
-                          ("mem_gb", "peak memory per answer (GB)")):
+    print("\n_Cost per answer: the whole pipeline with Leiden at every resolution of the sweep, so it does "
+          "not depend on the resolution the accuracy is read at._\n")
+    for metric, label in (("cost_s", "wall time per answer, whole sweep (s)"),
+                          ("cpu_s", "CPU time per answer, whole sweep (core-seconds)"),
+                          ("mem_gb", "peak memory per answer, whole sweep (GB)")):
         print(f"\n**{label[0].upper() + label[1:]}**\n")
-        per_res(pipeline_cost(metric, label))
+        pipeline_cost(metric, label)(ORACLE)
     print("\n**All numbers**\n")
     per_res(pipeline_table)
 ```
@@ -1316,16 +1318,16 @@ else:
 ### Where the time goes
 
 Each named pipeline's time split by what it was doing: start-up, moving data to and from the GPU,
-and the PCA, kNN and Leiden work itself. Reading and writing files is left out. One tab per
-dataset and size, smallest first; **Scaling** puts the sizes side by side per pipeline. One y
-axis throughout: every tab, pipeline and resolution, so bars compare by height. Follows
-its resolution dropdown: at the oracle resolution, Leiden is the whole sweep.
+and the PCA, kNN and Leiden work itself, for the whole pipeline as it is run: Leiden at every
+resolution of the sweep. Reading and writing files is left out. One tab per dataset and size,
+smallest first; **Scaling** puts the sizes side by side per pipeline. One y axis throughout, so
+bars compare by height.
 
 ```{python}
 #| output: asis
 explain("time_split")
 if len(pipes):
-    per_res(time_pane)
+    time_pane(ANY)
 ```
 
 ### Dominance
