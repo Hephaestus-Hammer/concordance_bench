@@ -47,16 +47,18 @@ SLICES = {
     "slice-cluster": {
         "pca": {"pc-baseline": ALL},
         "knn": {"nn-baseline": ALL},
-        "cluster": {"cl-baseline": ALL, "cl-scanpy": ALL, "cl-rapids": ALL},
+        "cluster": {"cl-baseline": ALL, "cl-scanpy": ALL, "cl-rapids": ALL, "cl-seurat": ALL, "cl-brisc": ALL},
     },
     "slice-knn": {
         "pca": {"pc-baseline": ALL},
-        "knn": {"nn-baseline": ALL, "nn-scanpy": ALL, "nn-scanpy-mt": ALL, "nn-rapids": ALL},
+        "knn": {"nn-baseline": ALL, "nn-scanpy": ALL, "nn-scanpy-mt": ALL, "nn-rapids": ALL, "nn-seurat": ALL,
+                "nn-brisc": ALL},
         "cluster": {"cl-baseline": seed0},
     },
     "slice-pca": {
         "pca": {m: ALL for m in ("pc-baseline", "pc-scanpy", "pc-randomized", "pc-lanczos", "pc-rapids",
-                                 "pc-rapids-randomized", "pc-rapids-lanczos", "pc-rapids-jacobi")},
+                                 "pc-rapids-randomized", "pc-rapids-lanczos", "pc-rapids-jacobi", "pc-seurat",
+                                 "pc-brisc")},
         "knn": {"nn-baseline": ALL},
         "cluster": {"cl-baseline": seed0},
     },

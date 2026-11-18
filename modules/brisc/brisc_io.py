@@ -80,16 +80,21 @@ def read_neighbors(path):
 
 
 def neighbors_from_distances(d):
-    """Each cell's neighbours as an (n x k) index array, nearest first (brisc's obsm['neighbors']).
-    Every row must hold the same number of neighbours."""
+    """Each cell's neighbours as an (n x k) uint32 array, nearest first (brisc's obsm['neighbors'],
+    which min_cluster_size merges by). k is the most any row holds: a sparse kNN graph drops a
+    neighbour at distance 0 (a duplicate cell), so such a row is padded with its nearest neighbour
+    (itself if it has none), which only repeats a vote when small clusters are merged."""
     d = sp.csr_matrix(d)
-    k = np.diff(d.indptr)
-    if len(k) and (k != k[0]).any():
-        raise ValueError(f"rows hold {k.min()} to {k.max()} neighbours: brisc needs the same number in every row")
-    k = int(k[0]) if len(k) else 0
-    idx = d.indices.reshape(-1, k)
-    order = np.argsort(d.data.reshape(-1, k), axis=1, kind="stable")
-    return np.ascontiguousarray(np.take_along_axis(idx, order, axis=1), dtype=np.uint32)  # brisc: uint32
+    counts = np.diff(d.indptr)
+    n, k = d.shape[0], int(counts.max()) if len(counts) else 0
+    out = np.empty((n, k), dtype=np.uint32)
+    for i in range(n):
+        lo, hi = d.indptr[i], d.indptr[i + 1]
+        row = d.indices[lo:hi][np.argsort(d.data[lo:hi], kind="stable")]
+        if len(row) < k:
+            row = np.concatenate([row, np.full(k - len(row), row[0] if len(row) else i)])
+        out[i] = row
+    return np.ascontiguousarray(out)
 
 
 def single_cell(X=None, cells=None, genes=None, n=None, obsm=None, obsp=None, num_threads=1):

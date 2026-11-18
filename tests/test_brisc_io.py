@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 import scipy.sparse as sp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "modules" / "brisc"))
@@ -19,10 +18,11 @@ def test_neighbors_from_distances_nearest_first_uint32():
     assert nb.tolist() == [[2, 3, 1], [0, 3, 2], [1, 3, 0], [0, 1, 2]]
 
 
-def test_neighbors_from_distances_needs_equal_rows():
-    d = sp.csr_matrix(np.array([[0, 1.0, 2.0], [1.0, 0, 0], [1.0, 2.0, 0]]))
-    with pytest.raises(ValueError, match="same number"):
-        io.neighbors_from_distances(d)
+def test_neighbors_from_distances_pads_short_rows():
+    """Row 1 lost a neighbour (a duplicate cell, distance 0, not stored); row 2 has none."""
+    d = sp.csr_matrix((np.array([1.0, 2.0, 0.5]), (np.array([0, 0, 1]), np.array([1, 2, 0]))), shape=(3, 3))
+    nb = io.neighbors_from_distances(d)
+    assert nb.tolist() == [[1, 2], [0, 0], [2, 2]]
 
 
 def test_neighbors_round_trip(tmp_path):
