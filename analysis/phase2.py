@@ -100,6 +100,7 @@ PIPELINES = {  # keep in step with scripts/make_filters.py
     "tuned-cpu":       ("pc-randomized", "nn-scanpy-mt", "cl-baseline"),
     "all-gpu":         ("pc-rapids", "nn-rapids", "cl-rapids"),
     "hybrid":          ("pc-rapids", "nn-rapids", "cl-baseline"),
+    "seurat-defaults": ("pc-seurat", "nn-seurat", "cl-seurat"),
 }
 
 

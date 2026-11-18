@@ -79,7 +79,7 @@ MEASURES = ["ari", "jaccard"]  # the partition-agreement toggle
 MNAME = {"ari": "ARI", "jaccard": "Jaccard"}
 RES_KEYS = [ORACLE] + sorted((k for k in stages["res_key"].unique() if k != ORACLE), key=float)
 datasets = sorted(stages["dataset"].unique())
-PIPE_ORDER = ["baseline", "scanpy-defaults", "tuned-cpu", "all-gpu", "hybrid"]
+PIPE_ORDER = ["baseline", "scanpy-defaults", "tuned-cpu", "all-gpu", "hybrid", "seurat-defaults"]
 PIPE_COLOUR = {p: fg.OMNICOL[i] for i, p in enumerate(PIPE_ORDER)}
 MOD_COLOUR = {}
 for s_ in ("pca", "knn", "cluster"):
@@ -1053,7 +1053,7 @@ come from, stage by stage? And when is a GPU worth it, measured rather than assu
 **Design.** Each stage tab reads its own slice of the plan: that stage varies, the other two
 stay at the exact baselines (covariance-eigh PCA, brute-force kNN, leidenalg run to
 convergence) with their seed fixed, so every difference belongs to that stage. The Full
-pipeline tab reads five named end-to-end pipelines with matched seeds (seed i at every stage).
+pipeline tab reads six named end-to-end pipelines with matched seeds (seed i at every stage).
 
 | Pipeline | PCA | kNN | Leiden |
 |---|---|---|---|
@@ -1062,6 +1062,13 @@ pipeline tab reads five named end-to-end pipelines with matched seeds (seed i at
 | tuned-cpu | randomized (CPU) | pynndescent, 8 threads | leidenalg |
 | all-gpu | covariance-eigh (GPU) | brute force (GPU) | cuGraph |
 | hybrid | covariance-eigh (GPU) | brute force (GPU) | leidenalg |
+| seurat-defaults | ScaleData (unit variance) + IRLBA | annoy, k = 20, SNN graph | Louvain (Seurat) |
+
+**seurat-defaults** is Seurat run as a Seurat user would, with one exception: the neighbour search
+uses all 50 PCs (Seurat's own default is the first 10). It scales every gene to unit variance before
+PCA, searches 20 neighbours instead of 15, and clusters a shared-nearest-neighbour graph with Louvain.
+So its PCA and graph differ from the others by design: compare it on accuracy, stability, cost and
+time, not on agreement with the exact baseline's embedding or graph.
 
 **Sizes are a nested ladder.** Every size is cut from one fixed ordering of each dataset's cells:
 the 5k cells are the first 5,000, the 10k cells the first 10,000 (the same 5,000 plus 5,000 more),
@@ -1197,7 +1204,7 @@ cost("cluster")
 
 ## Full pipeline
 
-The five named pipelines end to end, as in Ben's deck: accuracy over seeds against the chance
+The six named pipelines end to end, as in Ben's deck: accuracy over seeds against the chance
 and oracle bounds, stability, reproducibility, wall time and peak memory per answer; then one
 score and one threshold rule that combine them.
 
