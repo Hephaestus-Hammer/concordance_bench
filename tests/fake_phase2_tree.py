@@ -46,6 +46,7 @@ def _node(parent, stage, module, params, time_scale=1.0):
         s = SECS[module if module in SECS else stage] * time_scale
         (d / "performance.txt").write_text(BENCH.format(s=s, m=100 + s))
         _denet(d, s, 100 + s, 512 if "rapids" in module else None)
+        _events(d, stage, "rapids" in module)
     return d
 
 
@@ -66,6 +67,29 @@ def _denet(d, s, rss_mb, gpu_mb):
         lines.append(smp)
     lines.append({"kind": "exit", "ts_ms": t0 + 1000 * s})
     (d / "denet.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+
+
+# obkit phases as the modules log them, as shares of the job: the rest is "(unphased)" (start-up)
+COMPUTE = {"pca": "pca", "knn": "knn", "cluster": "leiden"}
+PHASES_CPU = [("load", 0.10), (None, 0.50), ("write", 0.10)]
+PHASES_GPU = [("load", 0.10), ("gpu_upload", 0.05), ("compute", 0.40), ("gpu_download", 0.05), ("write", 0.10)]
+
+
+def _events(d, stage, gpu):
+    """obkit-events.jsonl over the job's denet trace: start-up (20 %), then the phases above."""
+    if stage not in COMPUTE:
+        return
+    trace = [json.loads(x) for x in (d / "denet.jsonl").read_text().splitlines()]
+    t0, end = trace[0]["t0_ms"], trace[-1]["ts_ms"]
+    t, lines = t0 + 0.2 * (end - t0), []
+    iso = lambda ms: pd.Timestamp(ms, unit="ms", tz="UTC").strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    for name, frac in PHASES_GPU if gpu else PHASES_CPU:
+        name = name or COMPUTE[stage]
+        u = t + frac * (end - t0)
+        lines += [{"ts": iso(t), "pid": 1, "event": name, "phase": "start"},
+                  {"ts": iso(u), "pid": 1, "event": name, "phase": "end"}]
+        t = u
+    (d / "obkit-events.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
 
 
 def _tsv(path, index, col_values, index_name):

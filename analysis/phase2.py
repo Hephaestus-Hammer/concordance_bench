@@ -59,6 +59,10 @@ Outputs (phase2_<name>.tsv):
                             pipeline, dataset, size and res_key
   traces                    memory (RAM and GPU, GB) and cores busy over time of one representative job per
                             module (the median wall time) at each dataset's largest size
+  time                      where a named pipeline's time goes: per dataset, size and res_key, the median
+                            seconds of each segment (startup, gpu_transfer, pca, knn, cluster; io, the
+                            load and write phases, listed but left out of the total), from the modules'
+                            obkit phases over their denet traces
   obs                       every individual observation behind the medians, for box plots:
                             tab, metric, group (module, pipeline or "A vs B"), dataset,
                             subsample, cells, res_key ("*" where the resolution does not
@@ -572,6 +576,86 @@ def answers(runs, rt, cold):
     return pd.DataFrame(out)
 
 
+# ---- where the time goes ---------------------------------------------------------------
+
+# Segments of a job's wall time, from its obkit phases over its denet trace. Reading the input
+# and writing the output are left out (the same files for every method; they measure the disk
+# and the format, not the method); start-up and GPU transfers stay in, as the price of running
+# the method at all.
+SEGMENTS = ["startup", "gpu_transfer", "pca", "knn", "cluster"]
+IO_PHASES = {"load", "write"}
+GPU_PHASES = {"gpu_upload", "gpu_download"}
+
+
+def segment(stage, phase):
+    """A phase's segment: io (left out), startup, gpu_transfer, or the stage's own work."""
+    if phase in IO_PHASES:
+        return "io"
+    if phase in GPU_PHASES:
+        return "gpu_transfer"
+    if phase == "(unphased)":
+        return "startup"
+    return stage
+
+
+def job_segments(rt, ph):
+    """{job dir: {segment: seconds}}. A job without phases counts whole as its stage's work."""
+    out = {}
+    if len(ph):
+        for (d, stage), g in ph.groupby(["dir", "stage"]):
+            seg = {}
+            for _, r in g.iterrows():
+                k = segment(stage, r["phase"])
+                seg[k] = seg.get(k, 0.0) + float(r["duration_s"])
+            out[d] = seg
+    for _, r in rt.iterrows():
+        if r["dir"] not in out and r["stage"] in STAGES and np.isfinite(r["s"]):
+            out[r["dir"]] = {r["stage"]: float(r["s"]), "unphased_job": 1.0}
+    return out
+
+
+def time_breakdown(named, rt, ph, cold, bounds):
+    """Per named pipeline, dataset, size and res_key: the median seconds of each segment over
+    the pipeline's answers (PCA + kNN + Leiden: one run at a fixed resolution, the whole sweep
+    for "oracle"), cold starts left out where there are others. Long format: one row per segment,
+    io included for reference (not part of the bar)."""
+    if not len(named):
+        return pd.DataFrame()
+    segs = job_segments(rt, ph)
+    cells = {(b["dataset"], b["subsample"]): b["cells"] for _, b in bounds.iterrows()} if len(bounds) else {}
+    key = ["dataset", "subsample", "named", "pca_seed", "knn_seed", "cluster_seed", "run"]
+    answers_ = []
+    for k, g in named.groupby(key, dropna=False):
+        choices = [(ORACLE, g)] + [(res_key(r), gr) for r, gr in g.groupby("resolution")]
+        for rk, gr in choices:
+            dirs = [g["pca_dir"].iloc[0], g["knn_dir"].iloc[0], *gr["cluster_dir"]]
+            if any(d not in segs for d in dirs):
+                continue
+            tot = {}
+            for d in dirs:
+                for sname, v in segs[d].items():
+                    tot[sname] = tot.get(sname, 0.0) + v
+            answers_.append({**dict(zip(key, k)), "res_key": rk, "cold": any(d in cold for d in dirs),
+                             "resolutions": len(gr), **tot})
+    a = pd.DataFrame(answers_)
+    if not len(a):
+        return pd.DataFrame()
+    for c in [*SEGMENTS, "io", "unphased_job"]:
+        a[c] = a[c].fillna(0.0) if c in a else 0.0
+    rows = []
+    for (d, sub, name, rk), g in a.groupby(["dataset", "subsample", "named", "res_key"]):
+        g = g[~g["cold"]] if (~g["cold"]).any() else g
+        base = {"dataset": d, "subsample": sub, "cells": cells.get((d, sub), np.nan), "pipeline": name,
+                "res_key": rk, "answers": len(g), "resolutions": int(g["resolutions"].iloc[0]),
+                "unphased_jobs": int((g["unphased_job"] > 0).sum())}
+        meds = {c: float(g[c].median()) for c in [*SEGMENTS, "io"]}
+        total = sum(meds[c] for c in SEGMENTS)
+        for c in [*SEGMENTS, "io"]:
+            rows.append({**base, "segment": c, "seconds": meds[c],
+                         "share": meds[c] / total if total > 0 and c != "io" else np.nan, "total_s": total})
+    return pd.DataFrame(rows)
+
+
 # ---- summaries -------------------------------------------------------------------------
 
 def _pick(t, col="median", **where):
@@ -895,7 +979,7 @@ def main():
     runs = add_modularity(df, runs)
     stab_obs, repro_obs = pair_obs(runs, KEY, True), pair_obs(runs, KEY, False)
     stab, repro = summarise_pairs(stab_obs, KEY), summarise_pairs(repro_obs, KEY)
-    rt = rs.runtimes(df)[0]
+    rt, _, ph = rs.runtimes(df)
     cold = cold_starts(rt)
     pca, pca_pairs = pca_stage(df)
     knn, knn_pairs = knn_stage(df)
@@ -918,7 +1002,8 @@ def main():
     tables = {"bounds": bounds, "runs": runs, "jobs": rt, "pca": pca, "pca_pairs": pca_pairs, "knn": knn,
               "knn_pairs": knn_pairs, "stability": stab, "reproducibility": repro, "stages": stages,
               "answers": ans, "pipelines": pipes, "pipelines_runs": pipe_runs,
-              "stage_concordance": stage_conc, "obs": obs, "celltypes": cts, "traces": traces(rt, runs, bounds)}
+              "stage_concordance": stage_conc, "obs": obs, "celltypes": cts, "traces": traces(rt, runs, bounds),
+              "time": time_breakdown(named, rt, ph, cold, bounds)}
     for name, t in tables.items():
         t.drop(columns=[c for c in drop if c in t.columns and name != "jobs"]).to_csv(
             out / f"phase2_{name}.tsv", sep="\t", index=False)

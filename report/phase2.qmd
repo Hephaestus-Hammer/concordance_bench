@@ -70,7 +70,7 @@ def tsv(name):
 
 bounds, runs, stages, obs = tsv("bounds"), tsv("runs"), tsv("stages"), tsv("obs")
 pipes, stage_conc = tsv("pipelines"), tsv("stage_concordance")
-celltypes, traces = tsv("celltypes"), tsv("traces")
+celltypes, traces, timing = tsv("celltypes"), tsv("traces"), tsv("time")
 if not len(stages) or "res_key" not in stages.columns or not len(obs):
     raise RuntimeError(f"no per-resolution phase2_stages.tsv / phase2_obs.tsv in {R}: run analysis/phase2.py first")
 
@@ -123,11 +123,29 @@ def plain_log(axis):
     axis.set_minor_formatter(mticker.NullFormatter())
 
 
+def fixed_lim(values, log=False, pad=0.06):
+    """Axis limits that hold every value: the same for a metric at every resolution, measure,
+    dataset and tab, so the axes never move when the slider or a tab changes."""
+    v = pd.to_numeric(pd.Series(values), errors="coerce").dropna().to_numpy()
+    if log:
+        v = v[v > 0]
+    if not len(v):
+        return None
+    lo, hi = float(v.min()), float(v.max())
+    if log:
+        return lo / (1 + 3 * pad), hi * (1 + 3 * pad)
+    span = hi - lo or abs(hi) or 1.0
+    return lo - pad * span, hi + pad * span
+
+
 def boxes(o, ylabel, colours, order=None, logy=False, note=None):
     """Box plots with every observation as a point: one panel per dataset, the sizes along x
     (smallest first), one box per group side by side. GPU groups have dashed boxes; groups
-    missing from `colours` are drawn grey (seed floors)."""
+    missing from `colours` are drawn grey (seed floors). The y axis holds the metric's values at
+    every resolution, so it stays put when the slider moves."""
     o = o.dropna(subset=["value"])
+    lim = fixed_lim(obs[obs["tab"].isin(set(o["tab"])) & obs["metric"].isin(set(o["metric"]))]["value"], logy) \
+        if len(o) and {"tab", "metric"} <= set(o.columns) else None
     if not len(o):
         print("\n_Nothing to show here._\n")
         return
@@ -163,6 +181,8 @@ def boxes(o, ylabel, colours, order=None, logy=False, note=None):
         if logy:
             ax.set_yscale("log")
             plain_log(ax.yaxis)
+        if lim:
+            ax.set_ylim(*lim)
         ax.set_title(d, loc="left")
         ax.set_xlabel("cells")
     axes[0][0].set_ylabel(ylabel)
@@ -210,7 +230,7 @@ def trace_plot(stage):
         print("\n_No denet traces in these results._\n")
         return
     fig, axes = plt.subplots(1, len(datasets), figsize=(max(7, 4.6 * len(datasets)), 3.0),
-                             constrained_layout=True, squeeze=False)
+                             constrained_layout=True, squeeze=False, sharex=True, sharey=True)
     seen = {}
     twins = []
     for ax, d in zip(axes[0], datasets):
@@ -390,6 +410,20 @@ metric("memory", "Peak memory", "every Cost subtab",
        [("\\mathrm{RSS}_{\\mathrm{peak}}", "peak resident memory in RAM, GB"),
         ("\\mathrm{GPU}_{\\mathrm{peak}}", "peak GPU memory, GB (0 for CPU jobs)")],
        "GB; lower is better")
+metric("time_split", "Where the time goes", "Full pipeline: Where the time goes",
+       "An answer's wall time split by what the processes were doing, from the phases the modules log "
+       "(obkit) over their denet traces: start-up (interpreter, imports, compilation at import, the CUDA "
+       "context for GPU modules: everything before the first phase and after the last), GPU transfers "
+       "(copying the data to the GPU and the results back), and each stage's own work (PCA, kNN, Leiden). "
+       "Reading the input and writing the output are left out: every method reads and writes the same "
+       "files, so they measure the disk and the file format, not the method. Each segment is the median "
+       "over the pipeline's answers, so the bar, their sum, can differ slightly from the median wall time. "
+       "A job that logs no phases counts whole as its stage's work.",
+       r"T' = T_{\mathrm{start}} + T_{\mathrm{GPU\,transfer}} + T_{\mathrm{PCA}} + T_{\mathrm{kNN}} + "
+       r"\sum_{r \in \mathcal{R}} T_{\mathrm{Leiden}}(r) = T - T_{\mathrm{load}} - T_{\mathrm{write}}",
+       [("T", "the answer's wall time"), ("\\mathcal{R}", "one resolution, or the whole sweep at the oracle resolution")],
+       "seconds; share of T′ in the segments")
+
 metric("cost", "Effective cost", "Full pipeline › Trade-off and thresholds",
        "Wall time, charged extra for memory above a budget: free up to the budget, proportional above "
        "it, so a pipeline that needs twice the budget costs twice its wall time. The budget is a slider.",
@@ -519,6 +553,115 @@ def catalogue(*keys):
 ```
 
 ```{python}
+# ---- where the time goes: stacked bars, one tab per dataset and size -------------------------
+SEG_ORDER = ["startup", "gpu_transfer", "pca", "knn", "cluster"]
+SEG_NAME = {"startup": "start-up", "gpu_transfer": "GPU transfer", "pca": "PCA", "knn": "kNN", "cluster": "Leiden"}
+TIME_TOP = 1.0
+SEG_COLOUR = {"startup": "#b5b3ad", "gpu_transfer": "#8e5fc7", "pca": "#3b6fd4", "knn": "#2e9e5b", "cluster": "#e08a1e"}
+
+
+def _stack(ax, t, xs, labels, pct=True):
+    """Stacked bars of t (pipeline/position x segment seconds) at xs; segments ≥ 7 % labelled."""
+    bottom = np.zeros(len(xs))
+    top = TIME_TOP
+    for sname in SEG_ORDER:
+        v = np.array([t.get((x, sname), 0.0) for x in xs])
+        ax.bar(range(len(xs)), v, bottom=bottom, color=SEG_COLOUR[sname], width=0.7, edgecolor="white", lw=0.5,
+               label=SEG_NAME[sname])
+        tot = np.array([sum(t.get((x, s_), 0.0) for s_ in SEG_ORDER) for x in xs])
+        for i, (b, h, T) in enumerate(zip(bottom, v, tot)):
+            if pct and T > 0 and h / T >= 0.07 and h >= 0.06 * top:  # only where the label fits
+                ax.text(i, b + h / 2, f"{100 * h / T:.0f}%", ha="center", va="center", fontsize=7,
+                        color="white" if sname != "startup" else "#333")
+        bottom += v
+    for i, T in enumerate(bottom):
+        ax.text(i, T, f"{T:.3g} s", ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(range(len(xs)), labels, fontsize=8)
+    ax.set_ylim(0, 1.1 * TIME_TOP)
+    ax.grid(axis="x", visible=False)
+
+
+def _time_top():
+    """The tallest bar anywhere (every dataset, size, pipeline and resolution): one y axis for all."""
+    t = timing[timing["segment"].isin(SEG_ORDER)]
+    return float(t.groupby(["dataset", "subsample", "pipeline", "res_key"])["seconds"].sum().max()) if len(t) else 1.0
+
+
+def _time_at(k):
+    t = timing[(timing["res_key"] == k) & (timing["segment"].isin(SEG_ORDER))]
+    return t
+
+
+def _k(n):
+    n = int(n or 0)
+    return f"{n / 1000:g}k" if n >= 1000 else f"{n}"
+
+
+def time_tab(k, d, size):
+    t = _time_at(k)
+    t = t[(t["dataset"] == d) & (t["subsample"] == size)]
+    pipes_ = [p_ for p_ in PIPE_ORDER if p_ in set(t["pipeline"])]
+    if not pipes_:
+        print("\n_No timed answers here._\n")
+        return
+    vals = {(r["pipeline"], r["segment"]): r["seconds"] for _, r in t.iterrows()}
+    fig, ax = plt.subplots(figsize=(7.5, 3.6), constrained_layout=True)
+    _stack(ax, vals, pipes_, pipes_)
+    ax.set_ylabel("seconds (load and write left out)")
+    ax.set_title(f"{d} · {int(CELLS.get((d, size), 0)):,} cells · {res_text(k, 'Leiden sweep (oracle)')}", loc="left",
+                 fontsize=9)
+    ax.legend(*[x[::-1] for x in ax.get_legend_handles_labels()], loc="center left", bbox_to_anchor=(1, 0.5),
+              frameon=False, fontsize=8)
+    show(fig)
+    io_ = timing[(timing["res_key"] == k) & (timing["segment"] == "io") & (timing["dataset"] == d)
+                 & (timing["subsample"] == size)]
+    if len(io_):
+        print("\n_Left out, load and write: " + ", ".join(
+            f"{r['pipeline']} {r['seconds']:.3g} s" for _, r in io_.set_index("pipeline").loc[pipes_].reset_index().iterrows())
+            + "._\n")
+
+
+def time_scaling(k):
+    """One panel per pipeline: the stacked bars of every dataset and size, smallest first."""
+    t = _time_at(k)
+    pipes_ = [p_ for p_ in PIPE_ORDER if p_ in set(t["pipeline"])]
+    combos = sorted({(r["dataset"], r["subsample"]) for _, r in t.iterrows()}, key=lambda c: (CELLS.get(c, 0), c))
+    labels = [_k(CELLS.get(c)) + (f"\n{c[0]}" if len(datasets) > 1 else "") for c in combos]
+    fig, axes = plt.subplots(1, len(pipes_), figsize=(min(18, 3.2 * len(pipes_) + 1), 3.4), constrained_layout=True,
+                             squeeze=False, sharey=True)
+    for ax, p_ in zip(axes[0], pipes_):
+        g = t[t["pipeline"] == p_]
+        vals = {((r["dataset"], r["subsample"]), r["segment"]): r["seconds"] for _, r in g.iterrows()}
+        _stack(ax, vals, combos, labels, pct=False)
+        ax.set_title(p_, loc="left", fontsize=9)
+        ax.tick_params(axis="x", labelsize=7)
+    axes[0][0].set_ylabel("seconds (load and write left out)")
+    h, l_ = axes[0][0].get_legend_handles_labels()
+    fig.legend(h[::-1], l_[::-1], loc="outside right center", frameon=False, fontsize=8)
+    show(fig)
+
+
+def time_pane(k):
+    global TIME_TOP
+    TIME_TOP = _time_top()
+    if not len(timing):
+        print("\n_No phase timings in these results (modules without obkit phases, or no denet traces)._\n")
+        return
+    t = _time_at(k)
+    combos = sorted({(r["dataset"], r["subsample"]) for _, r in t.iterrows()}, key=lambda c: (CELLS.get(c, 0), c))
+    print("\n::: {.panel-tabset}\n")
+    for d, size in combos:
+        print(f"\n#### {d} · {_k(CELLS.get((d, size)))}\n")
+        time_tab(k, d, size)
+    print("\n#### Scaling\n")
+    time_scaling(k)
+    print("\n:::\n")
+    w = t.pivot_table(index=["dataset", "subsample", "cells", "pipeline"], columns="segment", values="seconds")
+    w = w[[c for c in SEG_ORDER if c in w.columns]].rename(columns=SEG_NAME)
+    w["total (s)"] = w.sum(axis=1)
+    table(w.reset_index().sort_values(["cells", "pipeline"]), 3, "Seconds per segment (medians)")
+
+
 # ---- the four subtabs, one function each, the same for every stage ------------------------
 
 MEASURE_NOTE = {"ari": "Partition agreement: **ARI**.", "jaccard": "Partition agreement: **best-match Jaccard**, with the number of clusters."}
@@ -744,6 +887,8 @@ def scatter_trio(k, m):
     for row, d in zip(axes, datasets):
         size, cells = _largest(d)
         sub = p[(p["dataset"] == d) & (p["subsample"] == size)].assign(cost_gbs=lambda x: x["cost_s"] * x["mem_gb"])
+        every = pipes[(pipes["dataset"] == d) & (pipes["subsample"] == size)].assign(
+            cost_gbs=lambda x: x["cost_s"] * x["mem_gb"])  # every resolution: fixed axes
         arms = _arms(k, m, d, size)
         fr = set(dm.front(list(arms), dm.relation(arms))) if arms else set()
         for ax, (x, y, title) in zip(row, trio):
@@ -754,6 +899,10 @@ def scatter_trio(k, m):
             if x == "cost_gbs":
                 ax.set_xscale("log")
                 plain_log(ax.xaxis)
+            if (lx := fixed_lim(every[x], x == "cost_gbs")):
+                ax.set_xlim(*lx)
+            if (ly := fixed_lim(every[y])):
+                ax.set_ylim(*ly)
             ax.set_xlabel(label[x])
             ax.set_ylabel(label[y])
             ax.set_title(f"{d} · {cells / 1000:g}k · {title}", loc="left", fontsize=8)
@@ -1060,6 +1209,21 @@ if not len(pipes):
 else:
     per_res(pipeline_pane, measured=True)
     per_res(pipeline_pane_free)
+```
+
+### Where the time goes
+
+Each named pipeline's time split by what it was doing: start-up, moving data to and from the GPU,
+and the PCA, kNN and Leiden work itself. Reading and writing files is left out. One tab per
+dataset and size, smallest first; **Scaling** puts the sizes side by side per pipeline. One y
+axis throughout: every tab, pipeline and resolution, so bars compare by height. Follows
+the resolution slider: at the oracle resolution, Leiden is the whole sweep.
+
+```{python}
+#| output: asis
+explain("time_split")
+if len(pipes):
+    per_res(time_pane)
 ```
 
 ### Dominance

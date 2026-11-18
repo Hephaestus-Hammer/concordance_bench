@@ -249,3 +249,29 @@ def test_mean_reproducibility_per_pipeline(t):
     # cl-rapids is not reproducible across folders in the fake tree; the CPU baseline is
     assert p["reproducibility_mean"] < 1
     assert _pipe(t, "baseline")["reproducibility_mean"] == pytest.approx(1.0)
+
+
+def test_time_breakdown_segments(tmp_path):
+    """The fake tree's phases: 20 % start-up and 10 % teardown (both unphased); CPU jobs 50 % work,
+    20 % load + write; rapids jobs 40 % compute, 10 % GPU transfer. Load and write stay out."""
+    import fake_phase2_tree as f
+    import resources as rs
+    root = f.build(tmp_path / "out", 0)
+    df = index_runs([root])
+    runs = phase2.clustering_table(df)
+    runs, bounds = phase2.accuracy(df, runs, with_bounds=False)
+    rt, _, ph = rs.runtimes(df)
+    t = phase2.time_breakdown(phase2.named_pipeline_runs(runs), rt, ph, phase2.cold_starts(rt), bounds)
+    one = t[(t["res_key"] == "1") & (t["dataset"] == "dsA") & (t["subsample"] == "in-all")]
+    b = one[one["pipeline"] == "baseline"].set_index("segment")["seconds"]
+    wall = {s: f.SECS[m] for s, m in zip(("pca", "knn", "cluster"), phase2.PIPELINES["baseline"])}
+    for s in ("pca", "knn", "cluster"):
+        assert b[s] == pytest.approx(0.5 * wall[s])
+    assert b["startup"] == pytest.approx(0.3 * sum(wall.values()))
+    assert b["io"] == pytest.approx(0.2 * sum(wall.values())) and b["gpu_transfer"] == 0
+    g = one[one["pipeline"] == "all-gpu"].set_index("segment")["seconds"]
+    assert g["gpu_transfer"] > 0
+    assert one.groupby("pipeline")["total_s"].first()["baseline"] == pytest.approx(0.8 * sum(wall.values()))
+    sweep = t[(t["res_key"] == "oracle") & (t["dataset"] == "dsA") & (t["subsample"] == "in-all")
+              & (t["pipeline"] == "baseline")].set_index("segment")["seconds"]
+    assert sweep["cluster"] == pytest.approx(3 * b["cluster"])   # three resolutions in the sweep
