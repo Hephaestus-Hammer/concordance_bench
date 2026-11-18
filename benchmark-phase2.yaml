@@ -29,6 +29,7 @@ software_environments:
   scanpy: {conda: envs/scanpy.yml}
   rapids: {conda: envs/rapids.yml}
   seurat: {conda: envs/seurat.yml}   # R 4.5 + Seurat 5.5 (Hephaestus-Hammer/seurat), plus denet
+  brisc: {conda: envs/brisc.yml}     # brisc 0.2.6 (conda-forge), plus denet and obkit
 
 stages:
   # Whole datasets, preprocessed once by scripts/publish_dataset.py (log1p CP10k, 2,000 HVGs,
@@ -161,6 +162,16 @@ stages:
         repository: *stage
         parameters:
           - {module: &m_seurat "https://github.com/Hephaestus-Hammer/seurat@dbffe697614ddce6d940625f8179ead7bbd63ed0", script: pca.R, solver: approximate, n_components: 50, scale: "true", random_seed: [0, 1, 2, 3, 4]}
+      # brisc with its defaults (the brisc-defaults pipeline only): genes scaled to unit variance
+      # inside the solver, 50 PCs, every core. The scripts live here, in modules/brisc/ of this
+      # repository (no omni-scrna module). float32 always (brisc's pca() takes nothing else), so
+      # no dtype: the float32 plan leaves it as it is.
+      - id: pc-brisc
+        name: "brisc defaults: pca (scaled, float32, 8 threads)"
+        software_environment: brisc
+        repository: *stage
+        parameters:
+          - {module: &m_brisc "https://github.com/Hephaestus-Hammer/concordance_bench@CHANGE_ME", script: modules/brisc/pca.py, n_components: 50, random_seed: [0, 1, 2, 3, 4]}
 
   # Exact: sklearn brute force (baseline), cuVS brute force (rapids). Approximate and seeded:
   # pynndescent on 1 thread (scanpy's default n_jobs) and on 8 (not reproducible at a fixed seed).
@@ -205,6 +216,15 @@ stages:
         repository: *stage
         parameters:
           - {module: *m_seurat, script: knn.R, k: 20, n_dims: 0, random_seed: [0, 1, 2, 3, 4]}
+      # brisc defaults: IVF neighbours (k-means, search the nearest clusters; k 20), then its
+      # Jaccard SNN graph (pairs with fewer than 3 shared neighbours dropped), every core.
+      - id: nn-brisc
+        name: "brisc defaults: neighbors (IVF, k 20) + shared_neighbors (8 threads)"
+        software_environment: brisc
+        resources: {cores: 8, mem_mb: 16000}
+        repository: *stage
+        parameters:
+          - {module: *m_brisc, script: modules/brisc/knn.py, k: 20, random_seed: [0, 1, 2, 3, 4]}
 
   # Every Leiden at 5 resolutions (accuracy depends on the resolution; the analysis reads each
   # pipeline at its oracle resolution) and 5 seeds (stability).
@@ -241,3 +261,11 @@ stages:
         repository: *stage
         parameters:
           - {module: *m_seurat, script: cluster.R, flavor: louvain_original, resolution: [0.05, 0.2, 0.5, 1.0, 2.0], random_seed: [0, 1, 2, 3, 4]}
+      # brisc's own Leiden (serial, deterministic at a seed) on its SNN graph, clusters under 5
+      # cells merged into a neighbour (min_cluster_size), over the same grid.
+      - id: cl-brisc
+        name: "brisc defaults: cluster (Leiden)"
+        software_environment: brisc
+        repository: *stage
+        parameters:
+          - {module: *m_brisc, script: modules/brisc/cluster.py, resolution: [0.05, 0.2, 0.5, 1.0, 2.0], random_seed: [0, 1, 2, 3, 4]}

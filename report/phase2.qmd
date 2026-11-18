@@ -80,7 +80,7 @@ MEASURES = ["ari", "jaccard"]  # the partition-agreement toggle
 MNAME = {"ari": "ARI", "jaccard": "Jaccard"}
 RES_KEYS = [ORACLE] + sorted((k for k in stages["res_key"].unique() if k != ORACLE), key=float)
 datasets = sorted(stages["dataset"].unique())
-PIPE_ORDER = ["baseline", "scanpy-defaults", "tuned-cpu", "all-gpu", "hybrid", "seurat-defaults"]
+PIPE_ORDER = ["baseline", "scanpy-defaults", "tuned-cpu", "all-gpu", "hybrid", "seurat-defaults", "brisc-defaults"]
 PIPE_COLOUR = {p: fg.OMNICOL[i] for i, p in enumerate(PIPE_ORDER)}
 MOD_COLOUR = {}
 for s_ in ("pca", "knn", "cluster"):
@@ -1129,7 +1129,7 @@ come from, stage by stage? And when is a GPU worth it, measured rather than assu
 **Design.** Each stage tab reads its own slice of the plan: that stage varies, the other two
 stay at the exact baselines (covariance-eigh PCA, brute-force kNN, leidenalg run to
 convergence) with their seed fixed, so every difference belongs to that stage. The Full
-pipeline tab reads six named end-to-end pipelines with matched seeds (seed i at every stage).
+pipeline tab reads seven named end-to-end pipelines with matched seeds (seed i at every stage).
 
 | Pipeline | PCA | kNN | Leiden |
 |---|---|---|---|
@@ -1139,12 +1139,19 @@ pipeline tab reads six named end-to-end pipelines with matched seeds (seed i at 
 | all-gpu | covariance-eigh (GPU) | brute force (GPU) | cuGraph |
 | hybrid | covariance-eigh (GPU) | brute force (GPU) | leidenalg |
 | seurat-defaults | ScaleData (unit variance) + IRLBA | annoy, k = 20, SNN graph | Louvain (Seurat) |
+| brisc-defaults | scaled (unit variance) block Krylov, float32 | IVF, k = 20, SNN graph | Leiden (brisc), small clusters merged |
 
 **seurat-defaults** is Seurat run as a Seurat user would, with one exception: the neighbour search
 uses all 50 PCs (Seurat's own default is the first 10). It scales every gene to unit variance before
 PCA, searches 20 neighbours instead of 15, and clusters a shared-nearest-neighbour graph with Louvain.
 So its PCA and graph differ from the others by design: compare it on accuracy, stability, cost and
 time, not on agreement with the exact baseline's embedding or graph.
+
+**brisc-defaults** is brisc with its defaults, which are close to Seurat's: genes scaled to unit
+variance inside a block Krylov PCA (always in float32, the only type its PCA accepts), 20 neighbours
+from an inverted-file index (k-means, then the nearest clusters searched exhaustively), a Jaccard SNN
+graph, and its own serial Leiden, which merges clusters under 5 cells into a neighbour. PCA and kNN
+use every core of their job (8). The same caveat holds: compare it on accuracy, stability, cost and time.
 
 **Sizes are a nested ladder.** Every size is cut from one fixed ordering of each dataset's cells:
 the 5k cells are the first 5,000, the 10k cells the first 10,000 (the same 5,000 plus 5,000 more),
@@ -1280,7 +1287,7 @@ cost("cluster")
 
 ## Full pipeline
 
-The six named pipelines end to end, as in Ben's deck: accuracy over seeds against the chance
+The seven named pipelines end to end, as in Ben's deck: accuracy over seeds against the chance
 and oracle bounds, stability, reproducibility, wall time and peak memory per answer; then one
 score and one threshold rule that combine them.
 

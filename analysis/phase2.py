@@ -103,6 +103,7 @@ PIPELINES = {  # keep in step with scripts/make_filters.py
     "all-gpu":         ("pc-rapids", "nn-rapids", "cl-rapids"),
     "hybrid":          ("pc-rapids", "nn-rapids", "cl-baseline"),
     "seurat-defaults": ("pc-seurat", "nn-seurat", "cl-seurat"),
+    "brisc-defaults":  ("pc-brisc", "nn-brisc", "cl-brisc"),
 }
 
 

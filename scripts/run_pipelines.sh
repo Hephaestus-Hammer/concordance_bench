@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run the Phase 2 pipelines slice: every filter in filters/phase2/pipelines/ (6 named pipelines x
+# Run the Phase 2 pipelines slice: every filter in filters/phase2/pipelines/ (7 named pipelines x
 # 5 matched seeds), one ob run each, into one output folder, so jobs the pipelines share (the
 # exact PCA and kNN) run once. Run from the repository root, on a GPU host (all-gpu, hybrid):
 #
@@ -16,7 +16,7 @@ out="${1:-out-phase2}"
 plan="${PLAN:-benchmark-phase2.yaml}"
 filters="${FILTERS:-filters/phase2}"
 cores="${SLURM_CPUS_PER_TASK:-8}"
-names="${PIPELINES:-baseline scanpy-defaults tuned-cpu all-gpu hybrid seurat-defaults}"
+names="${PIPELINES:-baseline scanpy-defaults tuned-cpu all-gpu hybrid seurat-defaults brisc-defaults}"
 for name in $names; do
     for f in "$filters"/pipelines/"$name"-seed*.yaml; do
         echo "== $f"

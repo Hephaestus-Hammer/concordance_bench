@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=6-00:00:00
-# Phase 2, REPS times over (default 3): the three slices and the six pipelines into one output
+# Phase 2, REPS times over (default 3): the three slices and the seven pipelines into one output
 # folder per replicate, then one set of tables and one report over all of them. Same-seed runs
 # in different folders pair up as replicates, so the report measures reproducibility.
 # The folders are named after the variant and the hardware the job landed on:
