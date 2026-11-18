@@ -55,7 +55,8 @@ Outputs (phase2_<name>.tsv):
                             reproducibility, cost, log10 cost against the fastest
   pipelines_runs            the named pipelines' runs per res_key (accuracy distributions)
   celltypes                 per cell type (reference label): its best-match Jaccard with the
-                            clusters, median over seeds, per Clustering module and named
+                            clusters and its one-vs-rest ARI against that best cluster,
+                            medians over seeds, per Clustering module and named
                             pipeline, dataset, size and res_key
   traces                    memory (RAM and GPU, GB) and cores busy over time of one representative job per
                             module (the median wall time) at each dataset's largest size
@@ -188,7 +189,8 @@ def oracle_bounds(embedding, labels, folds=5, seed=0):
 def accuracy(df, runs, celltypes=None, with_bounds=True):
     """Adds ari_truth, jaccard_truth, homogeneity, completeness and clusters (their number) to
     runs; returns (runs, bounds). `celltypes`, a list, gets one row per run and label: the
-    label's best-match Jaccard with the run's clusters (how well that cell type is recovered).
+    label's best-match Jaccard with the run's clusters and the one-vs-rest ARI against that
+    best cluster (how well that cell type is recovered).
     with_bounds=False skips the oracle bounds (cross-validated classifiers: slow at 100k cells)."""
     from sklearn.metrics import homogeneity_completeness_v_measure
 
@@ -219,8 +221,9 @@ def accuracy(df, runs, celltypes=None, with_bounds=True):
             runs.at[i, "homogeneity"], runs.at[i, "completeness"] = h, c
             runs.at[i, "clusters"] = codes.max() + 1
             if celltypes is not None:
-                celltypes.extend({"row": i, "label": names[li], "label_cells": int(sizes[li]), "jaccard": float(jt[li])}
-                                 for li in range(len(names)))
+                _, ct_ari = cc.celltype_scores(tc, codes)
+                celltypes.extend({"row": i, "label": names[li], "label_cells": int(sizes[li]), "jaccard": float(jt[li]),
+                                  "ari": float(ct_ari[li])} for li in range(len(names)))
         if not with_bounds or any(b["dataset"] == dataset and b["subsample"] == subsample for b in bounds):
             continue  # one bound per dataset and size, from the first folder
         e = emb_rows[[n[0].module == dataset and n[1].module == subsample and n[-1].module == BASELINE["pca"]
@@ -812,7 +815,7 @@ def _mean_pairs(po, d, s, pipeline, res, col):
 
 
 def celltype_table(runs, celltypes, ct_rows):
-    """Per cell type: its best-match Jaccard with the clusters, median over the group's runs."""
+    """Per cell type: its best-match Jaccard and one-vs-rest ARI, medians over the group's runs."""
     if not celltypes or not ct_rows:
         return pd.DataFrame()
     ct = pd.DataFrame(celltypes).set_index("row")
@@ -821,7 +824,8 @@ def celltype_table(runs, celltypes, ct_rows):
         g = ct[ct.index.isin(idx)]
         for (label, size), x in g.groupby(["label", "label_cells"]):
             out.append({"tab": tab, "group": group, "dataset": d, "subsample": s, "cells": cells, "res_key": key,
-                        "label": label, "label_cells": size, "jaccard": float(x["jaccard"].median()), "runs": len(x)})
+                        "label": label, "label_cells": size, "jaccard": float(x["jaccard"].median()),
+                        "ari": float(x["ari"].median()) if "ari" in x else np.nan, "runs": len(x)})
     return pd.DataFrame(out)
 
 

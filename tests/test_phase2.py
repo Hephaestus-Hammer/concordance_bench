@@ -275,3 +275,20 @@ def test_time_breakdown_segments(tmp_path):
     sweep = t[(t["res_key"] == "oracle") & (t["dataset"] == "dsA") & (t["subsample"] == "in-all")
               & (t["pipeline"] == "baseline")].set_index("segment")["seconds"]
     assert sweep["cluster"] == pytest.approx(3 * b["cluster"])   # three resolutions in the sweep
+
+
+def test_celltype_ari_matches_sklearn_on_the_best_cluster():
+    """Per label: one-vs-rest ARI against its best-Jaccard cluster, as sklearn computes it."""
+    import concordance as cc
+    from sklearn.metrics import adjusted_rand_score
+    rng = np.random.default_rng(1)
+    a = cc.codes(pd.Series(rng.integers(0, 4, 400)))
+    b = cc.codes(pd.Series(np.where(rng.random(400) < 0.8, a, rng.integers(0, 6, 400))))
+    j, r = cc.celltype_scores(a, b)
+    jb, _ = cc.jaccard_best_match(a, b)
+    assert np.allclose(j, jb)
+    for li in range(a.max() + 1):
+        js = [((a == li) & (b == k)).sum() / ((a == li) | (b == k)).sum() for k in range(b.max() + 1)]
+        assert r[li] == pytest.approx(adjusted_rand_score(a == li, b == int(np.argmax(js))))
+    exact = cc.celltype_scores(a, a)[1]
+    assert np.allclose(exact, 1.0)

@@ -15,10 +15,11 @@ format:
         th { border-bottom: 1px solid #999; }
         tr:nth-child(even) td { background: #f6f6f4; }
         .tbl { overflow-x: auto; margin: 0.5rem 0 1rem; }
-        .res-pane { display: none; }
+        .p2-pane { display: none; }
         #p2-res { position: sticky; top: 0; z-index: 1000; background: #fcfcfb; padding: 6px 10px;
                   border-bottom: 1px solid #ddd; margin-bottom: 0.8rem; font-size: 0.9rem; }
-        #p2-res input[type=range] { width: 260px; vertical-align: middle; margin: 0 0.6rem; }
+        .p2-choice { display: block; font-size: 0.85rem; margin: 0.6rem 0 0.2rem; color: #333; }
+        .p2-choice select { font-size: 0.85rem; margin-left: 0.4rem; }
         .p2-sliders label { display: inline-block; margin: 0 1.2rem 0.4rem 0; font-size: 0.85rem; }
         .p2-sliders input[type=range] { width: 140px; vertical-align: middle; }
         td.best { font-weight: bold; background: #e3e8fd !important; }
@@ -39,7 +40,7 @@ jupyter: python3
 # Reads analysis/phase2.py's TSVs from $PHASE2_RESULTS (default ../results/phase2).
 # Render: `pixi run report2`, or PHASE2_RESULTS=<dir> quarto render report/phase2.qmd
 # Figures: box plots of every individual observation (points) per dataset and size, static
-# matplotlib images, one set per Leiden resolution; the resolution slider shows one set at a time.
+# matplotlib images, one set per Leiden resolution; each plot's own dropdown shows one at a time.
 # The trade-off and threshold views are computed in the page. Formulas are MathML. Plain
 # JavaScript, no libraries: one self-contained HTML file that works offline.
 import base64
@@ -125,7 +126,7 @@ def plain_log(axis):
 
 def fixed_lim(values, log=False, pad=0.06):
     """Axis limits that hold every value: the same for a metric at every resolution, measure,
-    dataset and tab, so the axes never move when the slider or a tab changes."""
+    dataset and tab, so the axes never move when a dropdown or a tab changes."""
     v = pd.to_numeric(pd.Series(values), errors="coerce").dropna().to_numpy()
     if log:
         v = v[v > 0]
@@ -142,7 +143,7 @@ def boxes(o, ylabel, colours, order=None, logy=False, note=None):
     """Box plots with every observation as a point: one panel per dataset, the sizes along x
     (smallest first), one box per group side by side. GPU groups have dashed boxes; groups
     missing from `colours` are drawn grey (seed floors). The y axis holds the metric's values at
-    every resolution, so it stays put when the slider moves."""
+    every resolution, so it stays put when the resolution changes."""
     o = o.dropna(subset=["value"])
     lim = fixed_lim(obs[obs["tab"].isin(set(o["tab"])) & obs["metric"].isin(set(o["metric"]))]["value"], logy) \
         if len(o) and {"tab", "metric"} <= set(o.columns) else None
@@ -193,32 +194,47 @@ def boxes(o, ylabel, colours, order=None, logy=False, note=None):
         print(f"\n{note}\n")
 
 
-def celltype_map(tab, k, groups_order):
-    """Per cell type, each group's best-match Jaccard (median over seeds) at each dataset's
-    largest size: which cell types each implementation recovers and which it loses."""
-    c = celltypes[(celltypes["tab"] == tab) & (celltypes["res_key"] == k)] if len(celltypes) else celltypes
+def celltype_view(tab, groups_order):
+    """Per cell type (rows) and Leiden resolution (columns), one tool's recovery: best-match
+    Jaccard, or the one-vs-rest ARI against that best cluster, with the ARI/Jaccard toggle;
+    medians over seeds at each dataset's largest size. A dropdown picks the tool."""
+    c = celltypes[celltypes["tab"] == tab] if len(celltypes) else celltypes
     if not len(c):
+        print("\n_No per-cell-type results here._\n")
         return
+    tools = [g for g in groups_order if g in set(c["group"])] + sorted(set(c["group"]) - set(groups_order))
+    choose(lambda g, m: _celltype_map(c[c["group"] == g], g, m), tools, tools,
+           "Pipeline" if tab == "pipeline" else "Implementation", measured=True)
+
+
+def _celltype_map(c, group, m):
+    col = "ari" if m == "ari" and "ari" in c else "jaccard"
+    keys = [k for k in RES_KEYS if k in set(c["res_key"])]
     for d in datasets:
         x = c[c["dataset"] == d]
         if not len(x):
             continue
         x = x[x["cells"] == x["cells"].max()]
-        m = x.pivot_table(index=["label", "label_cells"], columns="group", values="jaccard")
-        m = m.sort_index(level="label_cells", ascending=False)
-        m = m[[g for g in groups_order if g in m.columns]]
-        fig, ax = plt.subplots(figsize=(3.0 + 1.0 * m.shape[1], 1.4 + 0.3 * m.shape[0]), constrained_layout=True)
-        im = ax.imshow(m.to_numpy(), aspect="auto", cmap="Blues", vmin=0, vmax=1)
-        ax.set_xticks(range(m.shape[1]), m.columns, rotation=30, ha="right", fontsize=7)
-        ax.set_yticks(range(m.shape[0]), [f"{lab} ({n:,})" for lab, n in m.index], fontsize=7)
+        t = x.pivot_table(index=["label", "label_cells"], columns="res_key", values=col)
+        t = t.sort_index(level="label_cells", ascending=False)[[k for k in keys if k in t.columns]]
+        v = t.to_numpy()
+        fig, ax = plt.subplots(figsize=(3.2 + 0.62 * t.shape[1], 1.4 + 0.3 * t.shape[0]), constrained_layout=True)
+        im = ax.imshow(np.clip(v, 0, 1), aspect="auto", cmap="Blues", vmin=0, vmax=1)
+        ax.set_xticks(range(t.shape[1]), ["oracle" if k == ORACLE else k for k in t.columns], fontsize=7)
+        if ORACLE in t.columns:
+            ax.axvline(0.5, color="white", lw=3)  # the oracle column apart from the fixed resolutions
+        ax.set_xlabel("Leiden resolution (oracle: each run's best)", fontsize=7)
+        ax.set_yticks(range(t.shape[0]), [f"{lab} ({n:,})" for lab, n in t.index], fontsize=7)
         ax.grid(False)
-        if m.size <= 400:
-            for (i, j), v in np.ndenumerate(m.to_numpy()):
-                if np.isfinite(v):
-                    ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=6,
-                            color="white" if v > 0.6 else "#222")
-        ax.set_title(f"{d} · {x['cells'].iloc[0] / 1000:g}k cells · per cell type (cells)", loc="left", fontsize=8)
-        fig.colorbar(im, ax=ax, shrink=0.6, label="Jaccard with best cluster")
+        if v.size <= 600:
+            for (i, j), val in np.ndenumerate(v):
+                if np.isfinite(val):
+                    ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=6,
+                            color="white" if val > 0.6 else "#222")
+        ax.set_title(f"{group} · {d} · {x['cells'].iloc[0] / 1000:g}k cells · per cell type (cells)", loc="left",
+                     fontsize=8)
+        fig.colorbar(im, ax=ax, shrink=0.6,
+                     label="ARI, cell type vs its best cluster" if col == "ari" else "Jaccard with best cluster")
         show(fig)
 
 
@@ -272,14 +288,27 @@ def ob(tab, metric, key=ANY):
     return obs[(obs["tab"] == tab) & (obs["metric"] == metric) & (obs["res_key"] == key)]
 
 
-def per_res(fn, measured=False):
-    """fn(res_key) once per resolution (fn(res_key, measure) per resolution and partition
-    measure if measured), each in a pane the resolution slider and the measure toggle show or hide."""
-    for k in RES_KEYS:
+RES_LABELS = ["each method's best (oracle)" if k == ORACLE else k for k in RES_KEYS]
+
+
+def choose(fn, keys, labels, title, measured=False):
+    """fn(key) once per key (fn(key, measure) per key and partition measure if measured), each in
+    a pane; a dropdown above them picks the key, the global ARI/Jaccard toggle the measure."""
+    opts = "".join(f'<option value="{html.escape(str(k))}">{html.escape(str(lab))}</option>'
+                   for k, lab in zip(keys, labels))
+    print("\n:::: {.p2-group}\n")
+    raw(f'<label class="p2-choice">{html.escape(title)}<select class="p2-select">{opts}</select></label>')
+    for k in keys:
         for m in (MEASURES if measured else [ANY]):
-            print(f'\n::: {{.res-pane data-res="{k}" data-measure="{m}"}}\n')
+            print(f'\n::: {{.p2-pane data-key="{html.escape(str(k))}" data-measure="{m}"}}\n')
             fn(k, m) if measured else fn(k)
             print("\n:::\n")
+    print("\n::::\n")
+
+
+def per_res(fn, measured=False):
+    """choose() over the Leiden resolutions, each method's oracle first."""
+    choose(fn, RES_KEYS, RES_LABELS, "Leiden resolution", measured)
 
 
 def sfx(m):
@@ -388,10 +417,10 @@ metric("gap", "Concordance gap", "every Concordance subtab",
        [("A_s, B_t", "a run of implementation A at seed s and of B at seed t, on the same upstream, in one folder"),
         ("\\mathrm{gap}_A > 0", "switching to B changes the result more than re-seeding A does")],
        "around 0 = interchangeable; positive = a real difference")
-metric("oracle_res", "Oracle resolution", "the resolution slider",
+metric("oracle_res", "Oracle resolution", "every resolution dropdown",
        "The Leiden resolution with the best median accuracy over seeds, chosen once per implementation "
        "or pipeline and dataset size (never per seed). It needs the labels, so a user cannot choose it: "
-       "it is the best case. The slider can show any fixed resolution instead.",
+       "it is the best case. Each plot's dropdown can show any fixed resolution instead.",
        r"r^{*} = \arg\max_{r} \operatorname{median}_{s} \mathrm{ARI}(\text{clusters}_{r,s}, \text{labels})",
        [("r", "a resolution of the sweep"), ("s", "a seed")], "")
 metric("wall", "Wall time", "every Cost subtab",
@@ -458,11 +487,19 @@ metric("n_clusters", "Number of clusters", "next to every Jaccard view, Accuracy
        "How many clusters the run found. Agreement measures depend on it: coarse partitions agree with "
        "each other more easily, and a partition finer or coarser than the labels cannot match them well.",
        r"K = |\{\text{clusters}\}|", [], "compare with the number of reference labels (Overview)")
-metric("celltype", "Per-cell-type recovery", "Clustering › Accuracy and Full pipeline, Jaccard toggle",
-       "For every reference cell type, the Jaccard index with the cluster that matches it best, median "
-       "over seeds: which cell types an implementation finds and which it splits or merges away.",
-       r"J(L) = \max_{B} \frac{|L \cap B|}{|L \cup B|}",
-       [("L", "the cells of one reference label"), ("B", "a cluster of the run")], "0 to 1; higher is better")
+metric("celltype", "Per-cell-type recovery", "Clustering › Accuracy and Full pipeline, Per cell type",
+       "For every reference cell type, how well one cluster recovers it, median over seeds, at each Leiden "
+       "resolution (columns; oracle: each run's best) and each dataset's largest size; a dropdown picks the "
+       "implementation or pipeline. With Jaccard: the Jaccard index with the best-matching cluster. With ARI: "
+       "the adjusted Rand index between the two-way splits {in the cell type, not} and {in that best "
+       "cluster, not}, which corrects the overlap for chance (1: the cluster is exactly the cell type; about "
+       "0: no better than chance). Shows which cell types are found, and which are split or merged away as "
+       "the resolution grows.",
+       r"J(L) = \max_{B} \frac{|L \cap B|}{|L \cup B|}, \qquad \mathrm{ARI}(L) = "
+       r"\mathrm{ARI}\big(\{L, \bar L\},\ \{B^{*}, \bar B^{*}\}\big)",
+       [("L", "the cells of one reference label"), ("B", "a cluster of the run"),
+        ("B^{*}", "the cluster with the highest Jaccard with L"), ("\\bar L", "every other cell")],
+       "0 to 1 (ARI can dip just below 0); higher is better")
 metric("homcom", "Homogeneity and completeness", "every Accuracy view",
        "Accuracy split into its two ways of failing. Homogeneity: is each cluster made of one cell type? "
        "Completeness: is each cell type in one cluster? Clusters that are too fine stay homogeneous but "
@@ -769,9 +806,6 @@ def _accuracy_pane(tab, k, m, colours, order=None, downstream=False):
         boxes(ob(tab, "accuracy_jaccard", k), f"{pre}accuracy (Jaccard with the labels)", colours, order=order,
               note=BOX_NOTE)
         _clusters_box(tab, k)
-        if not downstream:
-            print("\n**Per cell type**\n")
-            celltype_map(tab, k, order or sorted(colours))
 
 
 def _quality_pane(tab, k, colours, order=None):
@@ -793,6 +827,8 @@ def accuracy(stage):
             table(cols(st(stage, k), ["module", "dataset", "size", "cells", "resolution", "n_clusters", "accuracy_ari",
                                        "accuracy_share", "accuracy_jaccard", "homogeneity", "completeness", "modularity"]))
         per_res(pane, measured=True)
+        print("\n**Per cell type**\n")
+        celltype_view(stage, sorted(MOD_COLOUR))
         per_res(lambda k: _quality_pane(stage, k, MOD_COLOUR))
         sl = runs[runs["varies"].isin(["none", "cluster"]) & runs["pca_seed"].astype(str).isin(["0", "nan"])
                   & runs["knn_seed"].astype(str).isin(["0", "nan"])]
@@ -969,33 +1005,74 @@ def dominance_pane(k, m):
     table(pd.DataFrame(rows), title="Dominance at every size")
 
 
-def pipeline_pane(k, m):
+def pipeline_accuracy(k, m):
     if not len(pipes[pipes["res_key"] == k]):
         print("_No pipeline results at this resolution._\n")
         return
     _pipe_intro(k)
     print(f"{MEASURE_NOTE[m]}\n")
-    print("\n**Accuracy**\n")
     _accuracy_pane("pipeline", k, m, PIPE_COLOUR, order=PIPE_ORDER)
-    for metric, label in (("stability", "stability (between seeds)"), ("reproducibility", "reproducibility (same seed)")):
+
+
+def accuracy_ecdf(k, m):
+    """Accuracy over seeds as ECDFs, one per pipeline, at each dataset's largest size: further
+    right is better, steeper is more stable. The x axis holds every resolution."""
+    metric = "accuracy_share" if m == "ari" else "accuracy_jaccard"
+    o = ob("pipeline", metric, k)
+    if not len(o):
+        print("_No pipeline results at this resolution._\n")
+        return
+    lim = fixed_lim(obs[(obs["tab"] == "pipeline") & (obs["metric"] == metric)]["value"])
+    fig, axes = plt.subplots(1, len(datasets), figsize=(max(6.5, 3.6 * len(datasets)), 3.0), sharey=True, sharex=True,
+                             constrained_layout=True, squeeze=False)
+    for ax, d in zip(axes[0], datasets):
+        sub = o[o["dataset"] == d]
+        if not len(sub):
+            continue
+        sub = sub[sub["cells"] == sub["cells"].max()]
+        for name in PIPE_ORDER:
+            v = np.sort(sub.loc[sub["group"] == name, "value"].dropna().to_numpy())
+            if len(v):
+                ax.step(np.r_[v[0], v], np.r_[0, np.arange(1, len(v) + 1) / len(v)], where="post",
+                        color=PIPE_COLOUR[name], lw=1.6, ls="--" if GPU(name) else "-", label=name)
+        if m == "ari":
+            for x in (0, 1):
+                ax.axvline(x, color="#8c8b87", ls=":", lw=1)
+        if lim:
+            ax.set_xlim(*lim)
+        ax.set_title(f"{d} · {sub['cells'].iloc[0] / 1000:g}k cells", loc="left")
+        ax.set_xlabel("accuracy (ARI, share of oracle)" if m == "ari" else "accuracy (Jaccard with the labels)")
+    axes[0][0].set_ylabel("share of runs ≤ x")
+    h, l_ = axes[0][0].get_legend_handles_labels()
+    fig.legend(h, l_, loc="outside lower center", ncol=min(6, len(h)), frameon=False, fontsize=7)
+    show(fig)
+    print("\n_One step per run (seed × replicate) at each dataset's largest size. Further right: more accurate; "
+          "steeper: more stable. Dashed: pipelines with GPU stages"
+          + ("; grey: chance (0) and oracle (1)" if m == "ari" else "") + "._\n")
+
+
+def pipeline_spread(metric, label):
+    def pane(k, m):
         o = ob("pipeline", metric + sfx(m), k)
+        if not len(o):
+            print(f"_No {metric} here (it needs {'seeds' if metric == 'stability' else 'replicate folders'})._\n")
+            return
+        boxes(o, f"{label} ({MNAME[m]})", PIPE_COLOUR, order=PIPE_ORDER)
+    return pane
+
+
+def pipeline_cost(metric, label):
+    def pane(k):
+        o = ob("pipeline", metric, k)
         if len(o):
-            print(f"\n**{label[0].upper() + label[1:]}**\n")
-            boxes(o, f"{label.split(' (')[0]} ({MNAME[m]})", PIPE_COLOUR, order=PIPE_ORDER)
-    scatter_trio(k, m)
+            boxes(o, label, PIPE_COLOUR, order=PIPE_ORDER, logy=True)
+    return pane
 
 
-def pipeline_pane_free(k):
+def pipeline_table(k):
     p = pipes[pipes["res_key"] == k].rename(columns={"subsample": "size"})
     if not len(p):
         return
-    _quality_pane("pipeline", k, PIPE_COLOUR, order=PIPE_ORDER)
-    for metric, label in (("cost_s", "wall time per answer (s)"), ("cpu_s", "CPU time per answer (core-seconds)"),
-                          ("mem_gb", "peak memory per answer (GB)")):
-        o = ob("pipeline", metric, k)
-        if len(o):
-            print(f"\n**{label[0].upper() + label[1:]}**\n")
-            boxes(o, label, PIPE_COLOUR, order=PIPE_ORDER, logy=True)
     table(cols(p.sort_values(["dataset", "cells", "pipeline"]),
                ["pipeline", "dataset", "size", "cells", "resolution", "runs", "n_clusters", "accuracy_ari", "accuracy_share",
                 "accuracy_jaccard", "homogeneity", "completeness", "modularity", "stability", "stability_min",
@@ -1004,40 +1081,40 @@ def pipeline_pane_free(k):
 
 ```{python}
 #| output: asis
-# The resolution slider: sticky at the top of the page, it shows one resolution's panes everywhere.
-css = "".join(f'body[data-res="{k}"] .res-pane[data-res="{k}"][data-measure="*"] {{ display: block; }}\n'
-              + "".join(f'body[data-res="{k}"][data-measure="{m}"] .res-pane[data-res="{k}"][data-measure="{m}"] '
-                        '{ display: block; }\n' for m in MEASURES) for k in RES_KEYS)
-labels = ["each method's best (oracle)" if k == ORACLE else k for k in RES_KEYS]
-raw(f"""<style>{css}</style>
-<div id="p2-res"><b>Leiden resolution</b>
-<input type="range" id="p2-res-slider" min="0" max="{len(RES_KEYS) - 1}" step="1" value="0">
-<span id="p2-res-label" style="display:inline-block;min-width:13rem"></span>
-<b style="margin-left:1.2rem">Partition agreement</b>
+# The partition-agreement toggle, sticky at the top: ARI or Jaccard everywhere. Each
+# resolution-dependent plot has its own resolution dropdown (choose()); this script shows the
+# pane of every group that matches its dropdown and the toggle.
+raw("""<div id="p2-res"><b>Partition agreement</b>
 <label style="margin-left:0.5rem"><input type="radio" name="p2-measure" value="ari" checked> ARI</label>
 <label style="margin-left:0.5rem"><input type="radio" name="p2-measure" value="jaccard"> Jaccard</label>
-<span style="color:#777;margin-left:1rem">both move every result they affect, in every tab</span></div>
+<span style="color:#777;margin-left:1rem">moves every result it affects, in every tab; each plot picks its own
+Leiden resolution</span></div>
 <script>
-(function () {{
-  const keys = {json.dumps(RES_KEYS)}, labels = {json.dumps(labels)};
-  function set(i) {{
-    document.body.dataset.res = keys[i];
-    document.getElementById("p2-res-label").textContent = labels[i];
-    if (window.p2update) window.p2update();
-  }}
-  window.p2res = () => document.body.dataset.res || keys[0];
+(function () {
   window.p2measure = () => document.body.dataset.measure || "ari";
-  document.addEventListener("DOMContentLoaded", () => {{
-    const s = document.getElementById("p2-res-slider");
-    s.addEventListener("input", () => set(+s.value));
-    document.querySelectorAll('input[name="p2-measure"]').forEach(r => r.addEventListener("change", () => {{
+  function refresh() {
+    const m = window.p2measure();
+    document.querySelectorAll(".p2-group").forEach(g => {
+      const sel = g.querySelector("select.p2-select");
+      if (!sel || sel.closest(".p2-group") !== g) return;
+      g.querySelectorAll(".p2-pane").forEach(p => {
+        if (p.closest(".p2-group") !== g) return;
+        p.style.display = (p.dataset.key === sel.value && (p.dataset.measure === "*" || p.dataset.measure === m))
+          ? "block" : "none";
+      });
+    });
+    if (window.p2update) window.p2update();
+  }
+  document.addEventListener("DOMContentLoaded", () => {
+    document.querySelectorAll("select.p2-select").forEach(s => s.addEventListener("change", refresh));
+    document.querySelectorAll('input[name="p2-measure"]').forEach(r => r.addEventListener("change", () => {
       document.body.dataset.measure = r.value;
-      if (window.p2update) window.p2update();
-    }}));
+      refresh();
+    }));
     document.body.dataset.measure = "ari";
-    set(0);
-  }});
-}})();
+    refresh();
+  });
+})();
 </script>""")
 ```
 
@@ -1119,8 +1196,8 @@ as ARI or as best-match Jaccard. The Jaccard views add the number of clusters, w
 measures depend on, and per-cell-type recovery; homogeneity, completeness, modularity and
 cost do not depend on the toggle.
 
-**Resolution slider** (top of the page). Leiden runs at every resolution of the sweep; the
-slider shows every resolution-dependent result at one of them. At **each method's best
+**Leiden resolution** (a dropdown on every plot that depends on it). Leiden runs at every
+resolution of the sweep; each plot shows one of them. At **each method's best
 (oracle)**, the PCA and kNN tabs read downstream results at the baseline pipeline's oracle
 resolution, so a worse stage cannot be rescued by another resolution, and the Clustering and
 Full pipeline tabs read each implementation or pipeline at its own: a choice a user without
@@ -1210,12 +1287,30 @@ score and one threshold rule that combine them.
 
 ```{python}
 #| output: asis
-explain("accuracy", "jaccard", "stability", "homcom", "modularity", "wall", "cpu", "memory")
+explain("accuracy", "jaccard", "celltype", "stability", "homcom", "modularity", "wall", "cpu", "memory")
 if not len(pipes):
     print("_No named pipelines in these results: run the pipelines slice (scripts/run_pipelines.sh)._\n")
 else:
-    per_res(pipeline_pane, measured=True)
-    per_res(pipeline_pane_free)
+    print("\n**Accuracy**\n")
+    per_res(pipeline_accuracy, measured=True)
+    print("\n**Accuracy over seeds (ECDF)**\n")
+    per_res(accuracy_ecdf, measured=True)
+    print("\n**Per cell type**\n")
+    celltype_view("pipeline", PIPE_ORDER)
+    print("\n**Stability (between seeds)**\n")
+    per_res(pipeline_spread("stability", "stability"), measured=True)
+    print("\n**Reproducibility (same seed, other folders)**\n")
+    per_res(pipeline_spread("reproducibility", "reproducibility"), measured=True)
+    print("\n**Stability, accuracy and cost together**\n")
+    per_res(scatter_trio, measured=True)
+    print("\n**Homogeneity, completeness and modularity**\n")
+    per_res(lambda k: _quality_pane("pipeline", k, PIPE_COLOUR, order=PIPE_ORDER))
+    for metric, label in (("cost_s", "wall time per answer (s)"), ("cpu_s", "CPU time per answer (core-seconds)"),
+                          ("mem_gb", "peak memory per answer (GB)")):
+        print(f"\n**{label[0].upper() + label[1:]}**\n")
+        per_res(pipeline_cost(metric, label))
+    print("\n**All numbers**\n")
+    per_res(pipeline_table)
 ```
 
 ### Where the time goes
@@ -1224,7 +1319,7 @@ Each named pipeline's time split by what it was doing: start-up, moving data to 
 and the PCA, kNN and Leiden work itself. Reading and writing files is left out. One tab per
 dataset and size, smallest first; **Scaling** puts the sizes side by side per pipeline. One y
 axis throughout: every tab, pipeline and resolution, so bars compare by height. Follows
-the resolution slider: at the oracle resolution, Leiden is the whole sweep.
+its resolution dropdown: at the oracle resolution, Leiden is the whole sweep.
 
 ```{python}
 #| output: asis
@@ -1236,7 +1331,7 @@ if len(pipes):
 ### Dominance
 
 Which pipelines are better than which, stating only what the data supports: the relation of
-Ben's deck. Follows the resolution slider and the partition-agreement toggle.
+Ben's deck. Has its own resolution dropdown and follows the partition-agreement toggle.
 
 ```{python}
 #| output: asis
@@ -1257,7 +1352,9 @@ if len(pipes):
     data = json.loads(data.to_json(orient="records"))
     raw("""
 <div class="p2-sliders">
-<p>Follows the resolution slider and the partition-agreement toggle: with Jaccard, accuracy is
+<label class="p2-choice">Leiden resolution<select id="w-res">""" + "".join(
+        f'<option value="{html.escape(k)}">{html.escape(lab)}</option>' for k, lab in zip(RES_KEYS, RES_LABELS)) + """</select></label>
+<p>Follows its resolution dropdown and the partition-agreement toggle: with Jaccard, accuracy is
 the Jaccard with the labels and stability the Jaccard between seeds. Best per row highlighted.</p>
 <label>memory budget B <input type="range" id="w-mem" min="0" max="8" step="1" value="4"> <span></span></label><br>
 <label>w<sub>acc</sub> <input type="range" id="w-acc" min="0" max="3" step="0.25" value="1"> <span></span></label>
@@ -1289,7 +1386,7 @@ reproducibility at least the chosen value.</p>
     return [...g.values()].sort((a, b) => a[0].dataset.localeCompare(b[0].dataset) || a[0].cells - b[0].cells);
   }
   function update() {
-    const key = window.p2res ? window.p2res() : "oracle";
+    const key = $("w-res").value;
     const jac = (window.p2measure ? window.p2measure() : "ari") === "jaccard";
     const acc = r => jac ? r.accuracy_jaccard : r.accuracy_share;
     const rep = r => { const v = jac ? r.reproducibility_jaccard_mean : r.reproducibility_mean;
@@ -1344,6 +1441,7 @@ reproducibility at least the chosen value.</p>
   window.p2update = () => { if (prev) prev(); update(); };
   document.addEventListener("DOMContentLoaded", () => {
     ["w-mem", "w-acc", "w-stab", "w-cost", "t-acc", "t-stab"].forEach(id => $(id).addEventListener("input", update));
+    $("w-res").addEventListener("change", update);
     update();
   });
 })();

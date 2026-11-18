@@ -215,6 +215,36 @@ def jaccard_best_match(a, b):
     return best_a, best_b
 
 
+def celltype_scores(a, b):
+    """Per cluster of a (a reference label): (best-match Jaccard, one-vs-rest ARI), both against
+    the cluster of b that matches it best by Jaccard. The ARI is that of the two-way splits
+    {in the label, not} and {in that cluster, not}: 1 when the cluster is exactly the cell type,
+    about 0 when it is no better than chance, defined for every label however small. Integer codes."""
+    n, sa, sb = _contingency(a, b)
+    c = n.tocoo()
+    j = c.data / (sa[c.row] + sb[c.col] - c.data)
+    best_j = np.zeros(len(sa))
+    best_col = np.zeros(len(sa), dtype=np.int64)
+    order = np.lexsort((-c.col, j))           # per label the last entry is its best (ties: lowest cluster)
+    best_j[c.row[order]] = j[order]
+    best_col[c.row[order]] = c.col[order]
+    n11 = np.asarray(n[np.arange(len(sa)), best_col]).ravel()
+    N = float(len(np.asarray(a)))
+    ai, bj = sa.astype(float), sb[best_col].astype(float)
+    cells = np.stack([n11, ai - n11, bj - n11, N - ai - bj + n11])
+
+    def c2(x):
+        return x * (x - 1) / 2
+
+    index = c2(cells).sum(axis=0)
+    rows, cols = c2(ai) + c2(N - ai), c2(bj) + c2(N - bj)
+    expected = rows * cols / c2(N)
+    top = (rows + cols) / 2 - expected
+    with np.errstate(invalid="ignore", divide="ignore"):
+        best_ari = np.where(top > 0, (index - expected) / top, np.nan)
+    return best_j, best_ari
+
+
 def jaccard(a, b):
     """Symmetric best-match Jaccard: the mean over clusters (unweighted: every cluster counts
     the same, however small) in each direction, averaged over the two directions."""
