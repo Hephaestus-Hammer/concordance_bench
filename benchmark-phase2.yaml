@@ -160,7 +160,7 @@ stages:
         software_environment: seurat
         repository: *stage
         parameters:
-          - {module: &m_seurat "https://github.com/Hephaestus-Hammer/seurat@CHANGE_ME", script: pca.R, solver: approximate, n_components: 50, scale: "true", random_seed: [0, 1, 2, 3, 4]}
+          - {module: &m_seurat "https://github.com/Hephaestus-Hammer/seurat@dbffe697614ddce6d940625f8179ead7bbd63ed0", script: pca.R, solver: approximate, n_components: 50, scale: "true", random_seed: [0, 1, 2, 3, 4]}
 
   # Exact: sklearn brute force (baseline), cuVS brute force (rapids). Approximate and seeded:
   # pynndescent on 1 thread (scanpy's default n_jobs) and on 8 (not reproducible at a fixed seed).
