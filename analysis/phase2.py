@@ -89,8 +89,11 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
 import concordance as cc  # noqa: E402
+import progress  # noqa: E402
 import resources as rs  # noqa: E402
 from load import REPLICATE_KEYS, index_runs  # noqa: E402
+
+LOG = progress.NULL  # main() swaps in a real Log; tests and importers stay quiet
 
 STAGES = ("pca", "knn", "cluster")
 BASELINE = {"pca": "pc-baseline", "knn": "nn-baseline", "cluster": "cl-baseline"}
@@ -202,6 +205,7 @@ def accuracy(df, runs, celltypes=None, with_bounds=True):
     bounds = []
     truth_rows = df[df["output"] == "rawdata_clusters_truth"]
     emb_rows = df[df["output"] == "embedding_tsv"]
+    bar = LOG.bar("clusterings scored", len(runs))
     for (dataset, subsample, run), idx in runs.groupby(["dataset", "subsample", "run"]).groups.items():
         # each folder's own truth file (replicate folders hold identical ones)
         t = truth_rows[[n[0].module == dataset and len(n) > 1 and n[1].module == subsample and _run_tag(n) == run
@@ -222,6 +226,7 @@ def accuracy(df, runs, celltypes=None, with_bounds=True):
             h, c, _ = homogeneity_completeness_v_measure(tc, codes)
             runs.at[i, "homogeneity"], runs.at[i, "completeness"] = h, c
             runs.at[i, "clusters"] = codes.max() + 1
+            bar.tick()
             if celltypes is not None:
                 _, ct_ari = cc.celltype_scores(tc, codes)
                 celltypes.extend({"row": i, "label": names[li], "label_cells": int(sizes[li]), "jaccard": float(jt[li]),
@@ -231,6 +236,7 @@ def accuracy(df, runs, celltypes=None, with_bounds=True):
         e = emb_rows[[n[0].module == dataset and n[1].module == subsample and n[-1].module == BASELINE["pca"]
                       for n in emb_rows["nodes"]]]
         e = e if len(e) else emb_rows[[n[0].module == dataset and n[1].module == subsample for n in emb_rows["nodes"]]]
+        LOG.say(f"  oracle bounds for {dataset} {subsample} (cross-validated classifiers on {len(truth):,} cells)")
         lr, knn, lr_j, knn_j = (oracle_bounds(cc.read_embedding(e["path"].iloc[0]).reindex(order).to_numpy(),
                                               truth.to_numpy()) if len(e) else (np.nan,) * 4)
         best = lambda v: float(np.nanmax(v)) if np.isfinite(v).any() else np.nan  # noqa: E731
@@ -246,6 +252,7 @@ def add_modularity(df, runs):
     runs = runs.copy()
     runs["modularity"] = np.nan
     nb = df[df["output"] == "neighbors_h5"]
+    bar = LOG.bar("clusterings", len(runs))
     for (d, s, run), idx in runs.groupby(["dataset", "subsample", "run"]).groups.items():
         e = nb[[len(n) >= 4 and n[0].module == d and n[1].module == s and n[2].module == BASELINE["pca"]
                 and n[3].module == BASELINE["knn"] and _run_tag(n) == run for n in nb["nodes"]]]
@@ -254,6 +261,7 @@ def add_modularity(df, runs):
         graph, cells = cc.read_connectivities(e["path"].iloc[0])
         graph = ((graph + graph.T) / 2).tocsr()
         for i in idx:
+            bar.tick()
             lab = cc.read_clusters(runs.at[i, "path"]).reindex(cells)
             if lab.isna().any():
                 continue
@@ -282,7 +290,10 @@ def pair_obs(runs, key, same_folder):
     (stability), or identical seeds across folders (reproducibility). One row per pair."""
     seeds = ["pca_seed", "knn_seed", "cluster_seed"]
     out = []
-    for k, g in runs.groupby(key, dropna=False):
+    groups = runs.groupby(key, dropna=False)
+    bar = LOG.bar("groups of runs", groups.ngroups)
+    for k, g in groups:
+        bar.tick()
         if len(g) < 2:
             continue
         order = cc.read_clusters(g["path"].iloc[0]).index
@@ -338,12 +349,14 @@ def pca_stage(df):
         return cache[r["dir"]]
 
     t["fidelity"] = np.nan
+    bar = LOG.bar("PCA runs read", len(t))
     for (d, s, run), g in t.groupby(["dataset", "subsample", "run"]):
         ex = g[g["module"] == BASELINE["pca"]]
         if not len(ex):
             continue
         v_ex, var_ex = get(ex.iloc[0])
         for i, r in g.iterrows():
+            bar.tick()
             v, _ = get(r)
             t.at[i, "fidelity"] = cc.pca_fidelity(v_ex.to_numpy(), var_ex, v.reindex(v_ex.index).to_numpy())
     pairs = []
@@ -377,12 +390,14 @@ def knn_stage(df):
         return near[r["dir"]]
 
     t["fidelity"] = np.nan
+    bar = LOG.bar("kNN graphs read", len(t))
     for (d, s, run), g in t.groupby(["dataset", "subsample", "run"]):
         ex = g[g["module"] == BASELINE["knn"]]
         if not len(ex):
             continue
         g_ex, _ = get(ex.iloc[0])
         for i, r in g.iterrows():
+            bar.tick()
             t.at[i, "fidelity"] = float(cc.knn_shared_fraction(g_ex, get(r)[0]).mean())
     pairs = []
     for (d, s, m), g in t.groupby(["dataset", "subsample", "module"]):
@@ -978,34 +993,52 @@ def main():
                    help="write the TSVs only; skip rendering report/phase2.qmd to HTML")
     args = p.parse_args()
 
-    df = index_runs(args.from_out)
-    runs = clustering_table(df)
-    if not len(runs):
-        raise SystemExit("no Phase 2 clusterings found (data > input > pca > knn > cluster)")
+    global LOG
+    LOG = progress.Log("phase2", steps=12)
+    LOG.say(f"analysing {len(args.from_out)} folder(s): {' '.join(str(f) for f in args.from_out)}")
+    with LOG.step("indexing the output folders"):
+        df = index_runs(args.from_out)
+        runs = clustering_table(df)
+        if not len(runs):
+            raise SystemExit("no Phase 2 clusterings found (data > input > pca > knn > cluster)")
+        LOG.say(f"  {len(df):,} outputs, {len(runs):,} clusterings")
     celltypes = []
-    runs, bounds = accuracy(df, runs, celltypes)
-    runs = add_modularity(df, runs)
-    stab_obs, repro_obs = pair_obs(runs, KEY, True), pair_obs(runs, KEY, False)
-    stab, repro = summarise_pairs(stab_obs, KEY), summarise_pairs(repro_obs, KEY)
-    rt, _, ph = rs.runtimes(df)
-    cold = cold_starts(rt)
-    pca, pca_pairs = pca_stage(df)
-    knn, knn_pairs = knn_stage(df)
-    pca = add_cost(pca, rt, cold) if len(pca) else pca
-    knn = add_cost(knn, rt, cold) if len(knn) else knn
-    stage_conc = pd.concat([pca_concordance(pca), knn_concordance(knn), cluster_concordance(runs)],
-                           ignore_index=True)
-    ans = answers(runs, rt, cold)
-    obs, ct_rows = [], []
-    stages = stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs, celltypes, ct_rows)
-    named = named_pipeline_runs(runs)
-    pipes, pipe_runs = pipelines_summary(named, bounds, stab, repro, ans, stab_obs, repro_obs, obs, ct_rows)
-    cts = celltype_table(runs, celltypes, ct_rows)
-    obs = pd.concat([pd.DataFrame(obs), concordance_obs(stage_conc, bounds)], ignore_index=True)
-    stage_conc = stage_conc.drop(columns=[c for c in stage_conc.columns if c.startswith("_")])
+    with LOG.step("accuracy against the labels (and the oracle bounds)"):
+        runs, bounds = accuracy(df, runs, celltypes)
+    with LOG.step("modularity on the exact kNN graph"):
+        runs = add_modularity(df, runs)
+    with LOG.step("stability: every pair of seeds"):
+        stab_obs = pair_obs(runs, KEY, True)
+    with LOG.step("reproducibility: same seeds across folders"):
+        repro_obs = pair_obs(runs, KEY, False)
+        stab, repro = summarise_pairs(stab_obs, KEY), summarise_pairs(repro_obs, KEY)
+    with LOG.step("run times, memory and phases (denet, obkit)"):
+        rt, _, ph = rs.runtimes(df)
+        cold = cold_starts(rt)
+        LOG.say(f"  {len(rt):,} jobs")
+    with LOG.step("PCA slice: fidelity and agreement"):
+        pca, pca_pairs = pca_stage(df)
+        pca = add_cost(pca, rt, cold) if len(pca) else pca
+    with LOG.step("kNN slice: recall and shared neighbours"):
+        knn, knn_pairs = knn_stage(df)
+        knn = add_cost(knn, rt, cold) if len(knn) else knn
+    with LOG.step("concordance between implementations"):
+        stage_conc = pd.concat([pca_concordance(pca), knn_concordance(knn), cluster_concordance(runs)],
+                               ignore_index=True)
+    with LOG.step("stage and pipeline summaries"):
+        ans = answers(runs, rt, cold)
+        obs, ct_rows = [], []
+        stages = stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs, celltypes, ct_rows)
+        named = named_pipeline_runs(runs)
+        pipes, pipe_runs = pipelines_summary(named, bounds, stab, repro, ans, stab_obs, repro_obs, obs, ct_rows)
+        cts = celltype_table(runs, celltypes, ct_rows)
+        obs = pd.concat([pd.DataFrame(obs), concordance_obs(stage_conc, bounds)], ignore_index=True)
+        stage_conc = stage_conc.drop(columns=[c for c in stage_conc.columns if c.startswith("_")])
 
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
+    LOG.i += 1
+    LOG.say(f"step {LOG.i}/{LOG.steps}: traces, time breakdown and the tables in {out}")
     drop = ["path", "pca_dir", "knn_dir", "cluster_dir", "loadings", "dir"]
     tables = {"bounds": bounds, "runs": runs, "jobs": rt, "pca": pca, "pca_pairs": pca_pairs, "knn": knn,
               "knn_pairs": knn_pairs, "stability": stab, "reproducibility": repro, "stages": stages,
@@ -1020,10 +1053,12 @@ def main():
                   "format": [_folder_part(f, ("10x", "h5ad", "h5ad-dense")) or "omni" for f in args.from_out],
                   "hardware": [_folder_hardware(f) for f in args.from_out]}).to_csv(
         out / "phase2_folders.tsv", sep="\t", index=False)
-    print(f"wrote {out}/phase2_*.tsv: {len(runs)} clusterings, {len(stages)} stage rows, "
-          f"{len(pipes)} named-pipeline rows")
+    LOG.say(f"  wrote {out}/phase2_*.tsv: {len(runs)} clusterings, {len(stages)} stage rows, "
+            f"{len(pipes)} named-pipeline rows")
     if not args.no_report:
-        render_report(out)
+        with LOG.step("rendering the report (quarto prints each cell as it runs)"):
+            render_report(out)
+    LOG.say("finished")
 
 
 def _folder_part(folder, options):

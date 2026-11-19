@@ -54,6 +54,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import concordance as cc  # noqa: E402
 import dominance as dm  # noqa: E402
 import phase2 as p2  # noqa: E402
+import progress  # noqa: E402
 import resources as rs  # noqa: E402
 from load import index_runs  # noqa: E402
 
@@ -101,7 +102,10 @@ def group_name(pipeline):
 def _pair_rows(t, key, items, sims, level, group):
     """Every cross and floor pair within groups of identical modules, settings and seeds."""
     out = []
-    for k, g in t.groupby(key, dropna=False):
+    groups = t.groupby(key, dropna=False)
+    bar = p2.LOG.bar(f"{level} groups", groups.ngroups)
+    for k, g in groups:
+        bar.tick()
         if g["run"].nunique() < 2:
             continue
         rows = list(g.iterrows())
@@ -301,15 +305,22 @@ def cost(jobs, rt, cold, cost_tol=COST_TOL):
 
 def compare(f64, f32, tol=TOL, cost_tol=COST_TOL):
     """Every table, from the two precisions' folders."""
-    df, prec = load(f64, f32)
-    runs = p2.clustering_table(df)
-    if not len(runs):
-        raise SystemExit("no Phase 2 clusterings found (data > input > pca > knn > cluster)")
-    runs["precision"] = runs["run"].map(prec)
-    runs, _ = p2.accuracy(df, runs, with_bounds=False)
-    pairs = pd.DataFrame(pca_pairs(df, prec) + knn_pairs(df, prec) + cluster_pairs(runs))
-    rt = rs.runtimes(df)[0]
-    cold = p2.cold_starts(rt)
+    log = p2.LOG
+    with log.step("indexing the output folders"):
+        df, prec = load(f64, f32)
+        runs = p2.clustering_table(df)
+        if not len(runs):
+            raise SystemExit("no Phase 2 clusterings found (data > input > pca > knn > cluster)")
+        runs["precision"] = runs["run"].map(prec)
+        log.say(f"  {len(runs):,} clusterings")
+    with log.step("accuracy against the labels"):
+        runs, _ = p2.accuracy(df, runs, with_bounds=False)
+    with log.step("float32 against float64: PCA, kNN and Leiden pairs"):
+        pairs = pd.DataFrame(pca_pairs(df, prec) + knn_pairs(df, prec) + cluster_pairs(runs))
+        log.say(f"  {len(pairs):,} pairs")
+    with log.step("run times and memory"):
+        rt = rs.runtimes(df)[0]
+        cold = p2.cold_starts(rt)
     folders = pd.DataFrame({"folder": [Path(f).name for f in [*f64, *f32]], "tag": folder_tags([*f64, *f32]),
                             "precision": ["float64"] * len(f64) + ["float32"] * len(f32)})
     return {"folders": folders, "pairs": pairs, "agreement": agreement(pairs, tol),
@@ -337,7 +348,10 @@ def main():
     if len(args.float64) + len(args.float32) < 2:
         raise SystemExit("need at least one folder of each precision")
 
+    p2.LOG = progress.Log("precision", steps=6)
     tables = compare(args.float64, args.float32, args.tol, args.cost_tol)
+    p2.LOG.i += 1
+    p2.LOG.say(f"step {p2.LOG.i}/6: the tables")
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     for name, t in tables.items():
@@ -348,7 +362,9 @@ def main():
           f"({flagged} beyond replicate noise), {len(tables['accuracy'])} accuracy rows, "
           f"{len(tables['cost'])} cost rows")
     if not args.no_report:
-        render_report(out)
+        with p2.LOG.step("rendering the report"):
+            render_report(out)
+    p2.LOG.say("finished")
 
 
 if __name__ == "__main__":

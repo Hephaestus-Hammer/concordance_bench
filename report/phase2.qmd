@@ -37,6 +37,7 @@ jupyter: python3
 ---
 
 ```{python}
+#| label: setup
 # Reads analysis/phase2.py's TSVs from $PHASE2_RESULTS (default ../results/phase2).
 # Render: `pixi run report2`, or PHASE2_RESULTS=<dir> quarto render report/phase2.qmd
 # Figures: box plots of every individual observation (points) per dataset and size, static
@@ -333,6 +334,7 @@ BOX_NOTE = ("_Box: quartiles and median; whiskers: 1.5 × the box; points: every
 ```
 
 ```{python}
+#| label: setup-2
 # ---- the metric catalogue: one entry per metric, used by the Metrics tab and by every subtab --
 M = {}
 
@@ -591,6 +593,7 @@ def catalogue(*keys):
 ```
 
 ```{python}
+#| label: setup-3
 # ---- where the time goes: stacked bars, one tab per dataset and size -------------------------
 SEG_ORDER = ["startup", "gpu_transfer", "pca", "knn", "cluster"]
 SEG_NAME = {"startup": "start-up", "gpu_transfer": "GPU transfer", "pca": "PCA", "knn": "kNN", "cluster": "Leiden"}
@@ -1079,6 +1082,7 @@ def pipeline_table(k):
 ```
 
 ```{python}
+#| label: setup-4
 #| output: asis
 # The partition-agreement toggle, sticky at the top: ARI or Jaccard everywhere. Each
 # resolution-dependent plot has its own resolution dropdown (choose()); this script shows the
@@ -1164,6 +1168,7 @@ type's share of the whole dataset to within one cell. Differences between sizes 
 effects of scale, not of drawing other cells.
 
 ```{python}
+#| label: overview
 #| output: asis
 folders = runs["run"].fillna("").astype(str).nunique() if len(runs) else 0
 ftab = tsv("folders")
@@ -1219,21 +1224,25 @@ their cost) do not move.
 ::::: {.panel-tabset}
 ### Stability
 ```{python}
+#| label: pca-stability
 #| output: asis
 stability("pca")
 ```
 ### Concordance
 ```{python}
+#| label: pca-concordance
 #| output: asis
 concordance("pca")
 ```
 ### Accuracy
 ```{python}
+#| label: pca-accuracy
 #| output: asis
 accuracy("pca")
 ```
 ### Cost
 ```{python}
+#| label: pca-cost
 #| output: asis
 cost("pca")
 ```
@@ -1244,21 +1253,25 @@ cost("pca")
 ::::: {.panel-tabset}
 ### Stability
 ```{python}
+#| label: knn-stability
 #| output: asis
 stability("knn")
 ```
 ### Concordance
 ```{python}
+#| label: knn-concordance
 #| output: asis
 concordance("knn")
 ```
 ### Accuracy
 ```{python}
+#| label: knn-accuracy
 #| output: asis
 accuracy("knn")
 ```
 ### Cost
 ```{python}
+#| label: knn-cost
 #| output: asis
 cost("knn")
 ```
@@ -1269,21 +1282,25 @@ cost("knn")
 ::::: {.panel-tabset}
 ### Stability
 ```{python}
+#| label: clustering-stability
 #| output: asis
 stability("cluster")
 ```
 ### Concordance
 ```{python}
+#| label: clustering-concordance
 #| output: asis
 concordance("cluster")
 ```
 ### Accuracy
 ```{python}
+#| label: clustering-accuracy
 #| output: asis
 accuracy("cluster")
 ```
 ### Cost
 ```{python}
+#| label: clustering-cost
 #| output: asis
 cost("cluster")
 ```
@@ -1296,6 +1313,7 @@ and oracle bounds, stability, reproducibility, wall time and peak memory per ans
 score and one threshold rule that combine them.
 
 ```{python}
+#| label: full-pipeline
 #| output: asis
 explain("accuracy", "jaccard", "celltype", "stability", "homcom", "modularity", "wall", "cpu", "memory")
 if not len(pipes):
@@ -1335,6 +1353,7 @@ smallest first; **Scaling** puts the sizes side by side per pipeline. One y axis
 bars compare by height.
 
 ```{python}
+#| label: full-pipeline-where-the-time-goes
 #| output: asis
 explain("time_split")
 if len(pipes):
@@ -1347,6 +1366,7 @@ Which pipelines are better than which, stating only what the data supports: the 
 Ben's deck. Has its own resolution dropdown and follows the partition-agreement toggle.
 
 ```{python}
+#| label: full-pipeline-dominance
 #| output: asis
 explain("dominance")
 if len(pipes):
@@ -1356,6 +1376,7 @@ if len(pipes):
 ### Trade-off and thresholds
 
 ```{python}
+#| label: full-pipeline-trade-off-and-thresholds
 #| output: asis
 explain("cost", "tradeoff")
 if len(pipes):
@@ -1466,6 +1487,7 @@ reproducibility at least the chosen value.</p>
 Every metric in this report: what it measures, how it is computed, and where it appears.
 
 ```{python}
+#| label: metrics
 #| output: asis
 groups_ = [("PCA", ["pca_fidelity", "pca_agreement"]), ("kNN", ["knn_recall", "knn_shared"]),
            ("Clustering and the final clusters", ["ari", "jaccard", "n_clusters", "accuracy", "celltype", "homcom",
