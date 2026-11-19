@@ -19,3 +19,6 @@ out*/
 results/
 slurm-logs/
 *.patch
+*.sh
+*.sbatch
+
