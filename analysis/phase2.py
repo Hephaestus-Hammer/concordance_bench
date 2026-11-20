@@ -677,6 +677,81 @@ def time_breakdown(named, rt, ph, cold, bounds):
     return pd.DataFrame(rows)
 
 
+# ---- where the memory goes -------------------------------------------------------------
+
+# The same segments as the time, but memory does not add up: each segment's height is the peak
+# reached while the process was in it (RAM: resident set; GPU: the process's own device memory),
+# and a pipeline's peak is the largest of them (its stages run one after another, in separate
+# processes). Peaks come from denet's samples, so a phase shorter than the sampling interval can
+# show no sample (left blank) or miss a brief spike.
+# Peaks count only the samples taken inside a segment (resources: rss_in_mb, gpu_in_mb), so a short
+# phase does not inherit its neighbour's peak.
+MEM_KINDS = {"rss": ("rss_in_mb", "max_rss"), "gpu": ("gpu_in_mb", "gpu_mem_peak_mb")}
+
+
+def job_memory(rt, ph):
+    """{job dir: {segment: {"rss": MB, "gpu": MB}}}, the peak in each segment. A job without phases
+    counts whole as its stage's work, at the job's peak."""
+    out = {}
+    if len(ph):
+        for (d, stage), g in ph.groupby(["dir", "stage"]):
+            seg = {}
+            for _, r in g.iterrows():
+                k = segment(stage, r["phase"])
+                cur = seg.setdefault(k, {"rss": np.nan, "gpu": np.nan})
+                for kind, (col, _) in MEM_KINDS.items():
+                    v = float(r[col]) if pd.notna(r[col]) else np.nan
+                    cur[kind] = np.nanmax([cur[kind], v]) if np.isfinite(v) else cur[kind]
+            out[d] = seg
+    for _, r in rt.iterrows():
+        if r["dir"] not in out and r["stage"] in STAGES:
+            out[r["dir"]] = {r["stage"]: {kind: float(r[col]) if pd.notna(r[col]) else np.nan
+                                          for kind, (_, col) in MEM_KINDS.items()},
+                             "unphased_job": {"rss": 1.0, "gpu": np.nan}}
+    return out
+
+
+def memory_breakdown(named, rt, ph, cold, bounds):
+    """Per named pipeline, dataset and size: the median over the pipeline's answers (each the whole
+    sweep, cold starts left out where there are others) of the peak RAM and GPU memory in each
+    segment, and of the answer's overall peak (the largest segment, io left out). Long format: one
+    row per segment, io included for reference (not part of the peak). MB."""
+    if not len(named):
+        return pd.DataFrame()
+    mem = job_memory(rt, ph)
+    cells = {(b["dataset"], b["subsample"]): b["cells"] for _, b in bounds.iterrows()} if len(bounds) else {}
+    key = ["dataset", "subsample", "named", "pca_seed", "knn_seed", "cluster_seed", "run"]
+    answers_ = []
+    for k, g in named.groupby(key, dropna=False):
+        dirs = [g["pca_dir"].iloc[0], g["knn_dir"].iloc[0], *g["cluster_dir"]]
+        if any(d not in mem for d in dirs):
+            continue
+        row = {**dict(zip(key, k)), "res_key": "*", "cold": any(d in cold for d in dirs),
+               "unphased_job": any("unphased_job" in mem[d] for d in dirs)}
+        for sname in [*SEGMENTS, "io"]:
+            for kind in MEM_KINDS:
+                vals = [mem[d][sname][kind] for d in dirs if sname in mem[d]]
+                vals = [v for v in vals if np.isfinite(v)]
+                row[f"{sname}:{kind}"] = max(vals) if vals else np.nan
+        for kind in MEM_KINDS:
+            vals = [row[f"{s_}:{kind}"] for s_ in SEGMENTS if np.isfinite(row[f"{s_}:{kind}"])]
+            row[f"peak:{kind}"] = max(vals) if vals else np.nan
+        answers_.append(row)
+    a = pd.DataFrame(answers_)
+    if not len(a):
+        return pd.DataFrame()
+    rows = []
+    for (d, sub, name, rk), g in a.groupby(["dataset", "subsample", "named", "res_key"]):
+        g = g[~g["cold"]] if (~g["cold"]).any() else g
+        base = {"dataset": d, "subsample": sub, "cells": cells.get((d, sub), np.nan), "pipeline": name,
+                "res_key": rk, "answers": len(g), "unphased_jobs": int(g["unphased_job"].sum()),
+                "peak_rss_mb": float(g["peak:rss"].median()), "peak_gpu_mb": float(g["peak:gpu"].median())}
+        for c in [*SEGMENTS, "io"]:
+            rows.append({**base, "segment": c, "rss_mb": float(g[f"{c}:rss"].median()),
+                         "gpu_mb": float(g[f"{c}:gpu"].median())})
+    return pd.DataFrame(rows)
+
+
 # ---- summaries -------------------------------------------------------------------------
 
 def _pick(t, col="median", **where):
@@ -1038,13 +1113,14 @@ def main():
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     LOG.i += 1
-    LOG.say(f"step {LOG.i}/{LOG.steps}: traces, time breakdown and the tables in {out}")
+    LOG.say(f"step {LOG.i}/{LOG.steps}: traces, time and memory breakdowns and the tables in {out}")
     drop = ["path", "pca_dir", "knn_dir", "cluster_dir", "loadings", "dir"]
     tables = {"bounds": bounds, "runs": runs, "jobs": rt, "pca": pca, "pca_pairs": pca_pairs, "knn": knn,
               "knn_pairs": knn_pairs, "stability": stab, "reproducibility": repro, "stages": stages,
               "answers": ans, "pipelines": pipes, "pipelines_runs": pipe_runs,
               "stage_concordance": stage_conc, "obs": obs, "celltypes": cts, "traces": traces(rt, runs, bounds),
-              "time": time_breakdown(named, rt, ph, cold, bounds)}
+              "time": time_breakdown(named, rt, ph, cold, bounds),
+              "memory": memory_breakdown(named, rt, ph, cold, bounds)}
     for name, t in tables.items():
         t.drop(columns=[c for c in drop if c in t.columns and name != "jobs"]).to_csv(
             out / f"phase2_{name}.tsv", sep="\t", index=False)

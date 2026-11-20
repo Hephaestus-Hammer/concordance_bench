@@ -73,6 +73,7 @@ def tsv(name):
 bounds, runs, stages, obs = tsv("bounds"), tsv("runs"), tsv("stages"), tsv("obs")
 pipes, stage_conc = tsv("pipelines"), tsv("stage_concordance")
 celltypes, traces, timing = tsv("celltypes"), tsv("traces"), tsv("time")
+memory = tsv("memory")
 if not len(stages) or "res_key" not in stages.columns or not len(obs):
     raise RuntimeError(f"no per-resolution phase2_stages.tsv / phase2_obs.tsv in {R}: run analysis/phase2.py first")
 
@@ -442,6 +443,23 @@ metric("memory", "Peak memory", "every Cost subtab",
        [("\\mathrm{RSS}_{\\mathrm{peak}}", "peak resident memory in RAM, GB"),
         ("\\mathrm{GPU}_{\\mathrm{peak}}", "peak GPU memory, GB (0 for CPU jobs)")],
        "GB; lower is better")
+metric("mem_split", "Where the memory goes", "Full pipeline: Where the memory goes",
+       "An answer's peak memory per segment, the same segments as the time (start-up, GPU transfers, PCA, "
+       "kNN, Leiden) from the phases the modules log (obkit) over their denet traces: for each segment, the "
+       "largest resident set (RAM) and the largest GPU memory the process itself held while in it, over the "
+       "answer's jobs (Leiden at every resolution counts as one segment: its largest). Memory does not add "
+       "up: the stages run one after another in separate processes, so an answer's peak is its tallest "
+       "segment, and the bars stand side by side rather than stacked. Each stage's peak includes the data it "
+       "holds (the matrix it read, its result) and, for GPU modules, the CUDA context in RAM. Reading and "
+       "writing are left out of the bars and the peak, and noted below them, like the time. Each value is "
+       "the median over the pipeline's answers. Peaks come from denet's samples: a phase shorter than the "
+       "sampling interval shows no bar, and a brief spike between samples is missed. A job that logs no "
+       "phases counts whole as its stage's work, at its peak.",
+       r"M_{s} = \max_{\text{jobs}} \max_{t \in s} \mathrm{mem}(t), \qquad "
+       r"M = \max_{s \in \{\text{start-up},\,\text{GPU transfer},\,\text{PCA},\,\text{kNN},\,\text{Leiden}\}} M_{s}",
+       [("s", "a segment: the samples taken while the process was in it"),
+        ("\\mathrm{mem}(t)", "resident memory (RAM) or the process's own GPU memory at sample t, GB")],
+       "GB; lower is better")
 metric("time_split", "Where the time goes", "Full pipeline: Where the time goes",
        "An answer's wall time split by what the processes were doing, from the phases the modules log "
        "(obkit) over their denet traces: start-up (interpreter, imports, compilation at import, the CUDA "
@@ -701,6 +719,143 @@ def time_pane(k):
     w = w[[c for c in SEG_ORDER if c in w.columns]].rename(columns=SEG_NAME)
     w["total (s)"] = w.sum(axis=1)
     table(w.reset_index().sort_values(["cells", "pipeline"]), 3, "Seconds per segment (medians)")
+
+
+# ---- where the memory goes: the same segments, side by side (memory does not add up) ---------
+MEM_KIND = {"rss": ("rss_mb", "peak_rss_mb", "RAM (resident, GB)"),
+            "gpu": ("gpu_mb", "peak_gpu_mb", "GPU memory (the process's own, GB)")}
+MEM_TOP = {}
+
+
+def _mem_at(k):
+    return memory[memory["res_key"] == k] if len(memory) else memory
+
+
+def _mem_kinds():
+    """RAM always; GPU memory only if some job used the GPU."""
+    return [kd for kd in MEM_KIND if kd == "rss" or (len(memory) and memory[MEM_KIND[kd][0]].notna().any())]
+
+
+def _mem_segs(kind):
+    """Segments with a value anywhere (GPU transfer has none on CPU-only results): the same bars in
+    every tab."""
+    col = MEM_KIND[kind][0]
+    t = memory[memory["segment"].isin(SEG_ORDER)]
+    return [s_ for s_ in SEG_ORDER if t.loc[t["segment"] == s_, col].notna().any()]
+
+
+def _mem_top(kind):
+    col, peak, _ = MEM_KIND[kind]
+    v = pd.concat([memory.loc[memory["segment"].isin(SEG_ORDER), col], memory[peak]]) / 1024
+    return float(v.max()) if v.notna().any() else 1.0
+
+
+def _groups(ax, t, xs, labels, kind):
+    """One group of bars per x (a pipeline), a bar per segment: its peak in GB. The group's peak,
+    the tallest bar, is written above it."""
+    col, peak, _ = MEM_KIND[kind]
+    segs = _mem_segs(kind)
+    w = 0.8 / max(1, len(segs))
+    vals = {(r["x"], r["segment"]): r[col] / 1024 for _, r in t.iterrows()}
+    peaks = {r["x"]: r[peak] / 1024 for _, r in t.iterrows()}
+    for j, sname in enumerate(segs):
+        v = np.array([vals.get((x, sname), np.nan) for x in xs])
+        ax.bar(np.arange(len(xs)) - 0.4 + (j + 0.5) * w, np.nan_to_num(v), width=w, color=SEG_COLOUR[sname],
+               edgecolor="white", lw=0.5, label=SEG_NAME[sname])
+    for i, x in enumerate(xs):
+        P = peaks.get(x, np.nan)
+        if np.isfinite(P) and P > 0:
+            ax.text(i, P, f"{P:.3g} GB", ha="center", va="bottom", fontsize=7)
+        elif kind == "gpu":
+            ax.text(i, 0.02 * MEM_TOP[kind], "no GPU", ha="center", va="bottom", fontsize=7, color="#777")
+    ax.set_xticks(range(len(xs)), labels, fontsize=8)
+    ax.set_ylim(0, 1.12 * MEM_TOP[kind])
+    ax.grid(axis="x", visible=False)
+
+
+def mem_tab(k, d, size):
+    t = _mem_at(k)
+    t = t[(t["dataset"] == d) & (t["subsample"] == size)].assign(x=lambda f: f["pipeline"])
+    pipes_ = [p_ for p_ in PIPE_ORDER if p_ in set(t["pipeline"])]
+    if not pipes_:
+        print("\n_No memory traces here._\n")
+        return
+    kinds = _mem_kinds()
+    fig, axes = plt.subplots(len(kinds), 1, figsize=(7.5, 2.9 * len(kinds)), constrained_layout=True, squeeze=False,
+                             sharex=True)
+    for ax, kind in zip(axes[:, 0], kinds):
+        _groups(ax, t[t["segment"].isin(SEG_ORDER)], pipes_, pipes_, kind)
+        ax.set_ylabel(MEM_KIND[kind][2], fontsize=8)
+    axes[0, 0].set_title(f"{d} · {int(CELLS.get((d, size), 0)):,} cells · peak per segment, Leiden at every "
+                         f"resolution", loc="left", fontsize=9)
+    h, l_ = axes[0, 0].get_legend_handles_labels()
+    fig.legend(h, l_, loc="outside right center", frameon=False, fontsize=8)
+    show(fig)
+    io_ = t[t["segment"] == "io"].set_index("pipeline")
+    if len(io_):
+        bits = []
+        for p_ in pipes_:
+            if p_ in io_.index and np.isfinite(io_.loc[p_, "rss_mb"]):
+                v, P = io_.loc[p_, "rss_mb"] / 1024, io_.loc[p_, "peak_rss_mb"] / 1024
+                bits.append(f"{p_} {v:.3g} GB" + (" (above its peak)" if np.isfinite(P) and v > P else ""))
+        if bits:
+            print("\n_Left out, RAM while loading and writing: " + ", ".join(bits) + "._\n")
+
+
+def mem_scaling(k):
+    """One panel per pipeline: each segment's peak across the datasets and sizes, smallest first,
+    with the pipeline's peak dashed. RAM on top, GPU memory below."""
+    t = _mem_at(k)
+    pipes_ = [p_ for p_ in PIPE_ORDER if p_ in set(t["pipeline"])]
+    combos = sorted({(r["dataset"], r["subsample"]) for _, r in t.iterrows()}, key=lambda c: (CELLS.get(c, 0), c))
+    labels = [_k(CELLS.get(c)) + (f"\n{c[0]}" if len(datasets) > 1 else "") for c in combos]
+    kinds = _mem_kinds()
+    fig, axes = plt.subplots(len(kinds), len(pipes_), figsize=(min(18, 3.2 * len(pipes_) + 1), 2.9 * len(kinds)),
+                             constrained_layout=True, squeeze=False, sharey="row", sharex=True)
+    xs = np.arange(len(combos))
+    for r_, kind in enumerate(kinds):
+        col, peak, ylabel = MEM_KIND[kind]
+        for c_, p_ in enumerate(pipes_):
+            ax = axes[r_, c_]
+            g = t[t["pipeline"] == p_]
+            for sname in _mem_segs(kind):
+                gs = g[g["segment"] == sname].set_index(["dataset", "subsample"])[col]
+                ax.plot(xs, [gs.get(c, np.nan) / 1024 for c in combos], "o-", color=SEG_COLOUR[sname], ms=3, lw=1.3,
+                        label=SEG_NAME[sname])
+            gp = g.drop_duplicates(["dataset", "subsample"]).set_index(["dataset", "subsample"])[peak]
+            ax.plot(xs, [gp.get(c, np.nan) / 1024 for c in combos], "--", color="#222", lw=1, label="peak")
+            ax.set_ylim(0, 1.12 * MEM_TOP[kind])
+            ax.set_xticks(xs, labels, fontsize=7)
+            if r_ == 0:
+                ax.set_title(p_, loc="left", fontsize=9)
+        axes[r_, 0].set_ylabel(ylabel, fontsize=8)
+    h, l_ = axes[0, 0].get_legend_handles_labels()
+    fig.legend(h, l_, loc="outside right center", frameon=False, fontsize=8)
+    show(fig)
+
+
+def mem_pane(k):
+    if not len(memory) or memory["rss_mb"].notna().sum() == 0:
+        print("\n_No memory traces in these results (no denet traces)._\n")
+        return
+    for kind in MEM_KIND:
+        MEM_TOP[kind] = _mem_top(kind)
+    t = _mem_at(k)
+    combos = sorted({(r["dataset"], r["subsample"]) for _, r in t.iterrows()}, key=lambda c: (CELLS.get(c, 0), c))
+    print("\n::: {.panel-tabset}\n")
+    for d, size in combos:
+        print(f"\n#### {d} · {_k(CELLS.get((d, size)))}\n")
+        mem_tab(k, d, size)
+    print("\n#### Scaling\n")
+    mem_scaling(k)
+    print("\n:::\n")
+    for kind in _mem_kinds():
+        col, peak, ylabel = MEM_KIND[kind]
+        w = t.pivot_table(index=["dataset", "subsample", "cells", "pipeline"], columns="segment", values=col) / 1024
+        w = w[[c for c in SEG_ORDER if c in w.columns and w[c].notna().any()]].rename(columns=SEG_NAME)
+        w["peak"] = t.drop_duplicates(["dataset", "subsample", "pipeline"]).set_index(
+            ["dataset", "subsample", "cells", "pipeline"])[peak].reindex(w.index) / 1024
+        table(w.reset_index().sort_values(["cells", "pipeline"]), 3, f"{ylabel[0].upper() + ylabel[1:]}: peak per segment (medians)")
 
 
 # ---- the four subtabs, one function each, the same for every stage ------------------------
@@ -1358,6 +1513,23 @@ bars compare by height.
 explain("time_split")
 if len(pipes):
     time_pane(ANY)
+```
+
+### Where the memory goes
+
+The same split for memory: each named pipeline's peak RAM, and GPU memory where it used the GPU,
+in each segment (start-up, GPU transfer, PCA, kNN, Leiden at every resolution). Memory does not add
+up across stages that run one after another, so the bars stand side by side and the number above
+each group is the pipeline's peak: its tallest bar. Reading and writing are left out, as for the
+time. One tab per dataset and size, smallest first; **Scaling** follows each segment across sizes
+per pipeline. One y axis throughout for each of RAM and GPU memory.
+
+```{python}
+#| label: full-pipeline-where-the-memory-goes
+#| output: asis
+explain("mem_split")
+if len(pipes):
+    mem_pane(ANY)
 ```
 
 ### Dominance

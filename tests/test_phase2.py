@@ -292,3 +292,28 @@ def test_celltype_ari_matches_sklearn_on_the_best_cluster():
         assert r[li] == pytest.approx(adjusted_rand_score(a == li, b == int(np.argmax(js))))
     exact = cc.celltype_scores(a, a)[1]
     assert np.allclose(exact, 1.0)
+
+
+def test_memory_breakdown_segments(tmp_path):
+    """The fake tree's RAM peaks at mid-job (100 + seconds MB), inside the stage's own work, and is
+    half that at the start and end (start-up). Segments are peaks, not sums: Leiden is the largest
+    of its three jobs, and the pipeline's peak is its tallest segment."""
+    import fake_phase2_tree as f
+    import resources as rs
+    root = f.build(tmp_path / "out", 0)
+    df = index_runs([root])
+    runs = phase2.clustering_table(df)
+    runs, bounds = phase2.accuracy(df, runs, with_bounds=False)
+    rt, _, ph = rs.runtimes(df)
+    m = phase2.memory_breakdown(phase2.named_pipeline_runs(runs), rt, ph, phase2.cold_starts(rt), bounds)
+    assert set(m["res_key"]) == {"*"}
+    one = m[(m["dataset"] == "dsA") & (m["subsample"] == "in-all")]
+    b = one[one["pipeline"] == "baseline"].set_index("segment")
+    peak = {s: 100 + f.SECS[mod] for s, mod in zip(("pca", "knn", "cluster"), phase2.PIPELINES["baseline"])}
+    for s_ in ("pca", "knn", "cluster"):
+        assert b.loc[s_, "rss_mb"] == pytest.approx(peak[s_], rel=0.01)
+    assert b.loc["startup", "rss_mb"] == pytest.approx(max(peak.values()) / 2, rel=0.01)
+    assert b["peak_rss_mb"].iloc[0] == pytest.approx(max(peak.values()), rel=0.01)
+    assert b["gpu_mb"].isna().all()
+    g = one[one["pipeline"] == "all-gpu"].set_index("segment")
+    assert g["peak_gpu_mb"].iloc[0] > 0
