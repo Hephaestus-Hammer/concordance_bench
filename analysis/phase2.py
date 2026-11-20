@@ -80,6 +80,7 @@ an answer's peak is the largest of its jobs' (the stages run one after another).
 import argparse
 import itertools
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1150,12 +1151,14 @@ def _folder_hardware(folder):
 
 
 def render_report(out):
-    """Render report/phase2.qmd from the TSVs in `out` to out/phase2.html (needs quarto)."""
+    """Render report/phase2.qmd from the TSVs in `out` to out/phase2.html (needs quarto), and copy the
+    .qmd next to it."""
     out = out.resolve()
     qmd = Path(__file__).resolve().parent.parent / "report" / "phase2.qmd"
     subprocess.run(["quarto", "render", str(qmd), "--output-dir", str(out)], check=True,
                    env={**os.environ, "PHASE2_RESULTS": str(out)})
-    print(f"wrote {out / 'phase2.html'}")
+    shutil.copy2(qmd, out / qmd.name)  # the source next to the page it drew
+    print(f"wrote {out / 'phase2.html'} and {out / qmd.name}")
 
 
 if __name__ == "__main__":

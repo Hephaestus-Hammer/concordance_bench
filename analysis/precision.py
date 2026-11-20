@@ -43,6 +43,7 @@ Outputs (precision_<name>.tsv), then report/precision.qmd rendered to precision.
 import argparse
 import itertools
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -328,12 +329,14 @@ def compare(f64, f32, tol=TOL, cost_tol=COST_TOL):
 
 
 def render_report(out):
-    """Render report/precision.qmd from the TSVs in `out` to out/precision.html (needs quarto)."""
+    """Render report/precision.qmd from the TSVs in `out` to out/precision.html (needs quarto), and copy the
+    .qmd next to it."""
     out = out.resolve()
     qmd = Path(__file__).resolve().parent.parent / "report" / "precision.qmd"
     subprocess.run(["quarto", "render", str(qmd), "--output-dir", str(out)], check=True,
                    env={**os.environ, "PRECISION_RESULTS": str(out)})
-    print(f"wrote {out / 'precision.html'}")
+    shutil.copy2(qmd, out / qmd.name)  # the source next to the page it drew
+    print(f"wrote {out / 'precision.html'} and {out / qmd.name}")
 
 
 def main():
