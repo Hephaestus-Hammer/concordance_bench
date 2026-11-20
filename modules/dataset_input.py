@@ -9,7 +9,10 @@ The Phase 2 counterpart of hao_input.py, for every dataset (docs/phase2-plan.md)
 whole dataset and writes what the omni-scrna PCA stage reads, so the scanpy and rapids
 modules run on it unchanged:
 
-  {output_dir}/{name}_normalized_selected.h5   /matrix: CSC genes x cells (10x layout)
+  {output_dir}/{name}_normalized_selected.h5   the matrix, in --format (matrix_formats.py):
+                                                omni (default; CSC genes x cells, what every
+                                                module has read so far), 10x (Cell Ranger v3
+                                                HDF5) or h5ad (AnnData; --layout sparse or dense)
   {output_dir}/{name}.clusters_truth.tsv        cell_id<TAB>truths
 
 Steps, all on the whole dataset first so every subsample of it shares them:
@@ -44,7 +47,7 @@ import pandas as pd
 import scipy.sparse as sp
 
 sys.path.insert(0, str(Path(__file__).parent))
-from hao_input import write_omni_h5  # noqa: E402
+from matrix_formats import FORMATS, LAYOUTS, write_matrix  # noqa: E402
 
 
 def stratified_order(labels, seed=0):
@@ -109,7 +112,12 @@ def main():
     p.add_argument("--hvg_flavor", default="seurat", choices=["seurat", "cell_ranger", "seurat_v3"])
     p.add_argument("--order_seed", type=int, default=0, help="fixes the nested ordering (a design constant)")
     p.add_argument("--replicate", type=int, default=0)
+    p.add_argument("--format", default="omni", choices=FORMATS,
+                   help="file format of the matrix (all HDF5, same path; the PCA modules detect it)")
+    p.add_argument("--layout", default="sparse", choices=LAYOUTS, help="dense needs --format h5ad")
     args = p.parse_args()
+    if args.format != "h5ad" and args.layout != "sparse":
+        raise SystemExit(f"--format {args.format} is sparse: --layout dense needs --format h5ad")
 
     a = ad.read_h5ad(args.data_h5ad)
     if args.label_key not in a.obs:
@@ -117,10 +125,11 @@ def main():
     X, genes, cells, labels = prepare(a, args.label_key, args.n_cells, args.normalize,
                                       args.n_hvg, args.hvg_flavor, args.order_seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    write_omni_h5(X, genes, cells, args.output_dir / f"{args.name}_normalized_selected.h5")
+    write_matrix(X, genes, cells, args.output_dir / f"{args.name}_normalized_selected.h5", args.format, args.layout)
     pd.DataFrame({"cell_id": cells, "truths": labels}).to_csv(
         args.output_dir / f"{args.name}.clusters_truth.tsv", sep="\t", index=False)
-    print(f"{args.name}: {X.shape[0]} cells x {X.shape[1]} genes, {len(set(labels))} labels")
+    print(f"{args.name}: {X.shape[0]} cells x {X.shape[1]} genes, {len(set(labels))} labels, "
+          f"{args.format} ({args.layout})")
 
 
 if __name__ == "__main__":

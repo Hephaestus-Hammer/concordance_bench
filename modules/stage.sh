@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ob entrypoint `stage`: run one script of a module, unchanged, under denet.
 #
-#   stage.sh --module <git url>@<40-char commit> --script <file.py> <the script's own arguments>
+#   stage.sh --module <git url>@<40-char commit> --script <file.py|file.R> <the script's own arguments>
 #
 # --module and --script are this wrapper's own parameters and are not passed on; every
 # other argument goes to the script exactly as ob would pass it if the plan referenced
@@ -17,6 +17,7 @@
 #    through but swallows the script's output, so stdout and stderr go to
 #    <output_dir>/module.log and are replayed into the job's log afterwards.
 # 3. Without denet in the job's environment, the script runs unprofiled.
+#    A .R script runs with Rscript, anything else with python3.
 # 4. Cold compilation caches: every job gets fresh, empty caches for code compiled at run
 #    time, so each job pays its compilation cost as a first-time user would, CPU and GPU
 #    alike: numba (pynndescent, umap-learn) via NUMBA_CACHE_DIR, CuPy kernels via
@@ -38,7 +39,7 @@ while (($#)); do
   esac
 done
 if [[ -z $module || -z $script || -z $out ]]; then
-  echo "usage: stage.sh --module <git url>@<commit> --script <file.py> --output_dir <dir> [args...]" >&2
+  echo "usage: stage.sh --module <git url>@<commit> --script <file.py|file.R> --output_dir <dir> [args...]" >&2
   exit 2
 fi
 url=${module%@*} sha=${module##*@}
@@ -92,13 +93,17 @@ fi
 
 cd "$dir"
 export PYTHONUNBUFFERED=1  # prints and tracebacks in order in module.log
+case $script in
+  *.R) run=(Rscript "$script") ;;
+  *) run=(python3 "$script") ;;
+esac
 rc=0
 if command -v denet >/dev/null; then
   denet --json --quiet --gpu --write-env --out "$out/denet.jsonl" \
-    run bash -c 'exec python3 "$@" >"$0" 2>&1' "$out/module.log" "$script" ${args[@]+"${args[@]}"} || rc=$?
+    run bash -c 'exec "$@" >"$0" 2>&1' "$out/module.log" "${run[@]}" ${args[@]+"${args[@]}"} || rc=$?
   cat "$out/module.log" >&2
 else
   # 3. no denet: unprofiled
-  python3 "$script" ${args[@]+"${args[@]}"} || rc=$?
+  "${run[@]}" ${args[@]+"${args[@]}"} || rc=$?
 fi
 exit $rc

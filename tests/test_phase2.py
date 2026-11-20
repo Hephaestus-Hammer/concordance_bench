@@ -21,7 +21,8 @@ def t(tmp_path_factory):
     runs = phase2.clustering_table(df)
     runs, bounds = phase2.accuracy(df, runs)
     runs = phase2.add_modularity(df, runs)
-    stab, repro = phase2.stability(runs), phase2.reproducibility(runs)
+    so, ro = phase2.pair_obs(runs, phase2.KEY, True), phase2.pair_obs(runs, phase2.KEY, False)
+    stab, repro = phase2.summarise_pairs(so, phase2.KEY), phase2.summarise_pairs(ro, phase2.KEY)
     rt = phase2.rs.runtimes(df)[0]
     cold = phase2.cold_starts(rt)
     pca, pca_pairs = phase2.pca_stage(df)
@@ -29,7 +30,7 @@ def t(tmp_path_factory):
     pca, knn = phase2.add_cost(pca, rt, cold), phase2.add_cost(knn, rt, cold)
     ans = phase2.answers(runs, rt, cold)
     stages = phase2.stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold)
-    pipes, pipe_runs = phase2.pipelines_summary(phase2.named_pipeline_runs(runs), bounds, stab, repro, ans)
+    pipes, pipe_runs = phase2.pipelines_summary(phase2.named_pipeline_runs(runs), bounds, stab, repro, ans, so, ro)
     return dict(df=df, runs=runs, bounds=bounds, stab=stab, repro=repro, pca=pca, knn=knn,
                 stages=stages, ans=ans, pipes=pipes, pipe_runs=pipe_runs, pca_pairs=pca_pairs,
                 knn_pairs=knn_pairs, rt=rt, cold=cold)
@@ -103,16 +104,16 @@ def test_named_pipelines_matched_seeds_and_cost(t):
 def test_every_summary_at_every_resolution(t):
     keys = {"oracle", "0.5", "1", "2"}
     assert set(t["stages"]["res_key"]) == keys and set(t["pipes"]["res_key"]) == keys
-    # resolution-free columns repeat; resolution-dependent ones follow the slider
+    # resolution-free columns repeat; resolution-dependent ones differ by res_key
     r = t["stages"].query("stage == 'pca' and module == 'pc-randomized' and dataset == 'dsA' and subsample == 'in-small'")
     assert r["fidelity"].nunique() == 1 and r["accuracy_ari"].nunique() > 1
     fixed = _stage(t, "cluster", "cl-baseline", key="1")
     assert fixed["resolution"] == 1.0 and fixed["resolution_rule"] == "fixed"
 
 
-def test_answer_cost_one_leiden_at_a_fixed_resolution_the_sweep_at_oracle(t):
-    assert _pipe(t, "baseline", key="1")["cost_s"] == pytest.approx(10 + 8 + 2)
-    assert _pipe(t, "baseline")["cost_s"] == pytest.approx(10 + 8 + 3 * 2)
+def test_answer_cost_is_the_whole_sweep_at_every_resolution(t):
+    for key in ("oracle", "0.5", "1", "2"):
+        assert _pipe(t, "baseline", key=key)["cost_s"] == pytest.approx(10 + 8 + 3 * 2)  # PCA + kNN + 3 Leiden
 
 
 def test_cold_start_is_first_rapids_job_per_folder():
@@ -241,3 +242,78 @@ def test_cpu_time_and_memory_traces(t):
     gpu = tr[tr["module"].str.contains("rapids")]
     assert gpu["gpu_gb"].max() > 0 and tr[~tr["module"].str.contains("rapids")]["gpu_gb"].isna().all()
     assert (tr["cores"] == 1.0).all()  # the fake traces run one core flat out
+
+
+def test_mean_reproducibility_per_pipeline(t):
+    p = _pipe(t, "all-gpu")
+    # cl-rapids is not reproducible across folders in the fake tree; the CPU baseline is
+    assert p["reproducibility_mean"] < 1
+    assert _pipe(t, "baseline")["reproducibility_mean"] == pytest.approx(1.0)
+
+
+def test_time_breakdown_segments(tmp_path):
+    """The fake tree's phases: 20 % start-up and 10 % teardown (both unphased); CPU jobs 50 % work,
+    20 % load + write; rapids jobs 40 % compute, 10 % GPU transfer. Load and write stay out. Every
+    answer is the whole sweep: Leiden at each of the three resolutions."""
+    import fake_phase2_tree as f
+    import resources as rs
+    root = f.build(tmp_path / "out", 0)
+    df = index_runs([root])
+    runs = phase2.clustering_table(df)
+    runs, bounds = phase2.accuracy(df, runs, with_bounds=False)
+    rt, _, ph = rs.runtimes(df)
+    t = phase2.time_breakdown(phase2.named_pipeline_runs(runs), rt, ph, phase2.cold_starts(rt), bounds)
+    assert set(t["res_key"]) == {"*"}
+    one = t[(t["dataset"] == "dsA") & (t["subsample"] == "in-all")]
+    b = one[one["pipeline"] == "baseline"].set_index("segment")["seconds"]
+    wall = {s: f.SECS[m] for s, m in zip(("pca", "knn", "cluster"), phase2.PIPELINES["baseline"])}
+    sweep = wall["pca"] + wall["knn"] + 3 * wall["cluster"]
+    assert b["pca"] == pytest.approx(0.5 * wall["pca"]) and b["knn"] == pytest.approx(0.5 * wall["knn"])
+    assert b["cluster"] == pytest.approx(3 * 0.5 * wall["cluster"])
+    assert b["startup"] == pytest.approx(0.3 * sweep)
+    assert b["io"] == pytest.approx(0.2 * sweep) and b["gpu_transfer"] == 0
+    g = one[one["pipeline"] == "all-gpu"].set_index("segment")["seconds"]
+    assert g["gpu_transfer"] > 0
+    assert one.groupby("pipeline")["total_s"].first()["baseline"] == pytest.approx(0.8 * sweep)
+
+
+def test_celltype_ari_matches_sklearn_on_the_best_cluster():
+    """Per label: one-vs-rest ARI against its best-Jaccard cluster, as sklearn computes it."""
+    import concordance as cc
+    from sklearn.metrics import adjusted_rand_score
+    rng = np.random.default_rng(1)
+    a = cc.codes(pd.Series(rng.integers(0, 4, 400)))
+    b = cc.codes(pd.Series(np.where(rng.random(400) < 0.8, a, rng.integers(0, 6, 400))))
+    j, r = cc.celltype_scores(a, b)
+    jb, _ = cc.jaccard_best_match(a, b)
+    assert np.allclose(j, jb)
+    for li in range(a.max() + 1):
+        js = [((a == li) & (b == k)).sum() / ((a == li) | (b == k)).sum() for k in range(b.max() + 1)]
+        assert r[li] == pytest.approx(adjusted_rand_score(a == li, b == int(np.argmax(js))))
+    exact = cc.celltype_scores(a, a)[1]
+    assert np.allclose(exact, 1.0)
+
+
+def test_memory_breakdown_segments(tmp_path):
+    """The fake tree's RAM peaks at mid-job (100 + seconds MB), inside the stage's own work, and is
+    half that at the start and end (start-up). Segments are peaks, not sums: Leiden is the largest
+    of its three jobs, and the pipeline's peak is its tallest segment."""
+    import fake_phase2_tree as f
+    import resources as rs
+    root = f.build(tmp_path / "out", 0)
+    df = index_runs([root])
+    runs = phase2.clustering_table(df)
+    runs, bounds = phase2.accuracy(df, runs, with_bounds=False)
+    rt, _, ph = rs.runtimes(df)
+    m = phase2.memory_breakdown(phase2.named_pipeline_runs(runs), rt, ph, phase2.cold_starts(rt), bounds)
+    assert set(m["res_key"]) == {"*"}
+    one = m[(m["dataset"] == "dsA") & (m["subsample"] == "in-all")]
+    b = one[one["pipeline"] == "baseline"].set_index("segment")
+    peak = {s: 100 + f.SECS[mod] for s, mod in zip(("pca", "knn", "cluster"), phase2.PIPELINES["baseline"])}
+    for s_ in ("pca", "knn", "cluster"):
+        assert b.loc[s_, "rss_mb"] == pytest.approx(peak[s_], rel=0.01)
+    assert b.loc["startup", "rss_mb"] == pytest.approx(max(peak.values()) / 2, rel=0.01)
+    assert b["peak_rss_mb"].iloc[0] == pytest.approx(max(peak.values()), rel=0.01)
+    assert b["gpu_mb"].isna().all()
+    g = one[one["pipeline"] == "all-gpu"].set_index("segment")
+    assert g["peak_gpu_mb"].iloc[0] > 0

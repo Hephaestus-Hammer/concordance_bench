@@ -1,6 +1,7 @@
 # ob output tree and local run scratch
 out/
 runs/
+analysis/metrics_correlations.py
 
 # data
 *.h5ad
@@ -19,3 +20,6 @@ out*/
 results/
 slurm-logs/
 *.patch
+*.sh
+*.sbatch
+

@@ -116,6 +116,38 @@ technology and label quality.
   whole-pipeline replicates are used, a replicate counts as one stage's own only if its
   upstream output is byte-identical (checked by hash).
 
+### Precision and hardware
+
+`scripts/run_phase2.sbatch` runs the whole plan once (three slices, five pipelines, then the
+tables and the report) into a folder named after the PCA precision and the hardware the job
+landed on, `out-phase2_<precision>_<GPU>_<N>core` (`scripts/hw_tag.sh`; `cpu_<N>core` without a
+GPU), with tables and report in `results/phase2_<same>`.
+
+- **float64** (default) runs the plan as it is: every PCA module has `dtype: float64`.
+- **float32** (`PRECISION=float32`) writes `benchmark-phase2-float32.yaml`, the plan with every PCA
+  `dtype: float64` set to `float32`, and its own filters in `filters/phase2-float32/`. The two
+  precisions never share a folder, a filter or a report: put together in one analysis, same-seed
+  runs of the two would be read as replicates.
+- What precision covers: the PCA computation (the matrix is cast before PCA). The embedding is
+  written as text and read back in float64. kNN and Leiden keep their own precision: sklearn
+  brute force, leidenalg and igraph compute in float64; pynndescent, cuML and cuGraph in float32.
+- Same-seed replicates: the script runs the plan `REPS` times (default 3) into
+  `..._rep1`, `..._rep2`, `..._rep3` and analyses them together, so every report measures
+  reproducibility. `REPS=1` for a single run. Only folders of one precision, format and hardware
+  are analysed together.
+
+### File formats
+
+The input modules can write the matrix in three HDF5 formats, all to the same path, which the
+PCA modules detect from the file's layout (`modules/matrix_formats.py`): **omni** (the
+omni-scrna CSC layout, the default and what every module read so far), **10x** (Cell Ranger
+v3 HDF5, read with `scanpy.read_10x_h5`) and **h5ad** (AnnData, CSR or dense: `layout`).
+`FORMAT=10x|h5ad|h5ad-dense` in `scripts/run_phase2.sbatch` writes a plan variant with the
+format on every input module and its own filters. Only PCA reads the matrix, so a format run
+needs only the PCA slice (`SLICES=pca PIPELINES=none`); what the format changes is the PCA
+job's load phase (and, dense, which code path PCA takes). Needs input, scanpy-fork and
+rapids commits that write and read the formats.
+
 ## Metrics
 
 The report is organised by stage. Each stage tab (PCA, kNN, Clustering) has the same four
@@ -188,8 +220,11 @@ count the same thing twice; the weights make that choice visible.
   (`pixi run filters` prints the counts); `--sizes` drops sizes that add nothing new.
 - **Fair CPU comparison.** Most CPU modules use one core; the multithreaded pynndescent
   variant is what keeps "GPU against CPU" from being "GPU against one core".
-- **Reuse, don't reimplement**: Ben's `almost-dominance-perf` code (dominance relation,
-  transitivity check) can be fed the same tables later, as an extra section.
+- **Dominance**: the relation of Ben's deck (almost-stochastic dominance on accuracy, box
+  dominance on stability and log cost, τ = 0.01, δ_s = 0.01, δ_c = log 1.25, cost = GB·s per
+  answer) is in `analysis/dominance.py`, written from the deck's definitions because his
+  `almost-dominance-perf` code was not to hand; swap his functions in once it is. The Full
+  pipeline tab tests transitivity, draws the Hasse diagram and lists the front.
 
 ## Order of work
 

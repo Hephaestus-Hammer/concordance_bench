@@ -1,0 +1,16 @@
+# GENERATED from pixi.toml [feature.brisc] (pixi workspace export conda-environment)
+name: brisc
+channels:
+- conda-forge
+- nodefaults
+dependencies:
+- python 3.12.*
+- brisc ==0.2.6
+- h5py *
+- pandas *
+- polars *
+- scipy *
+- denet ==0.10.3
+- pip
+- pip:
+  - obkit>=0.0.3, <0.0.4

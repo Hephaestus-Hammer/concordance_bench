@@ -38,7 +38,10 @@ STAGE_OF_OUTPUT = {"embedding_tsv": "pca", "neighbors_h5": "knn", "clusters_tsv"
 FIELDS = ["s", "max_rss", "cpu_time", "peak_cores", "max_threads", "gpu_util_mean", "gpu_util_max",
           "gpu_mem_peak_mb", "source", "t0_ms"]  # t0_ms: job start (denet), NaN without a trace
 PHASE_FIELDS = ["start_s", "duration_s", "cpu_s", "mean_cores", "peak_cores", "peak_rss_mb", "gpu_util_mean",
-                "gpu_mem_peak_mb", "samples"]
+                "gpu_mem_peak_mb", "samples", "rss_in_mb", "gpu_in_mb"]
+# rss_in_mb, gpu_in_mb: peaks over the samples taken inside the phase only. obkit's peaks count
+# every sample whose interval overlaps the phase, so a short phase next to a big one inherits the
+# big one's peak; these do not (NaN when no sample fell inside).
 
 
 def _nan(v):
@@ -95,8 +98,19 @@ def read_phases(node_dir, trace):
     if not events:
         return []
     rows = prof.attribute(events, trace)
+    smp = trace["samples"]
+    inside = lambda s, a, b: a <= s["ts_ms"] <= b  # noqa: E731
+    windows = [(e["start_ms"], e["end_ms"]) for e in events]
     for r in rows:
         r["start_s"] = 0.0 if r["event"] == "(unphased)" else (r["start_ms"] - trace["t0_ms"]) / 1000.0
+        if r["event"] == "(unphased)":
+            mine = [s for s in smp if not any(inside(s, a, b) for a, b in windows)]
+        else:
+            mine = [s for s in smp if inside(s, r["start_ms"], r["end_ms"])]
+        rss = [s["mem_rss_kb"] / 1024.0 for s in mine if s.get("mem_rss_kb") is not None]
+        gpu = [s["gpu_mem_bytes"] / 2**20 for s in mine if s.get("gpu_mem_bytes") is not None]
+        r["rss_in_mb"] = max(rss) if rss else np.nan
+        r["gpu_in_mb"] = max(gpu) if gpu else np.nan
     return rows
 
 

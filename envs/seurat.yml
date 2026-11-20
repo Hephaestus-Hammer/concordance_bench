@@ -1,0 +1,16 @@
+# GENERATED from pixi.toml [feature.seurat] (pixi workspace export conda-environment)
+name: seurat
+channels:
+- conda-forge
+- bioconda
+- nodefaults
+dependencies:
+- r-base >=4.5,<4.6
+- r-seurat >=5.5.1,<6
+- r-data.table *
+- r-argparser *
+- r-jsonlite *
+- r-matrix *
+- bioconductor-rhdf5 *
+- bioconductor-hdf5array *
+- denet ==0.10.3

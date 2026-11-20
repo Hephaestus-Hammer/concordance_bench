@@ -18,8 +18,8 @@ Counts include the dataset downloads; ob's dry run reports the same number of ru
 Each slice is written twice: <slice>.yaml (every module, for a GPU host) and <slice>-cpu.yaml
 (rapids modules left out: a filter bypasses ob's capability gate, see filters/README.md).
 
-The pipelines slice is five named end-to-end pipelines with matched seeds. A filter picks
-modules per stage and ob runs every combination across stages, so one filter for five
+The pipelines slice is seven named end-to-end pipelines with matched seeds. A filter picks
+modules per stage and ob runs every combination across stages, so one filter for seven
 pipelines would run all of their crossings, and "seed i" at each stage would run every
 combination of seeds. So pipelines/ holds one filter per pipeline and seed, each keeping
 exactly one parameter combination per stage (seed i where the module is seeded, its only
@@ -47,16 +47,18 @@ SLICES = {
     "slice-cluster": {
         "pca": {"pc-baseline": ALL},
         "knn": {"nn-baseline": ALL},
-        "cluster": {"cl-baseline": ALL, "cl-scanpy": ALL, "cl-rapids": ALL},
+        "cluster": {"cl-baseline": ALL, "cl-scanpy": ALL, "cl-rapids": ALL, "cl-seurat": ALL, "cl-brisc": ALL},
     },
     "slice-knn": {
         "pca": {"pc-baseline": ALL},
-        "knn": {"nn-baseline": ALL, "nn-scanpy": ALL, "nn-scanpy-mt": ALL, "nn-rapids": ALL},
+        "knn": {"nn-baseline": ALL, "nn-scanpy": ALL, "nn-scanpy-mt": ALL, "nn-rapids": ALL, "nn-seurat": ALL,
+                "nn-brisc": ALL},
         "cluster": {"cl-baseline": seed0},
     },
     "slice-pca": {
         "pca": {m: ALL for m in ("pc-baseline", "pc-scanpy", "pc-randomized", "pc-lanczos", "pc-rapids",
-                                 "pc-rapids-randomized", "pc-rapids-lanczos", "pc-rapids-jacobi")},
+                                 "pc-rapids-randomized", "pc-rapids-lanczos", "pc-rapids-jacobi", "pc-seurat",
+                                 "pc-brisc")},
         "knn": {"nn-baseline": ALL},
         "cluster": {"cl-baseline": seed0},
     },
@@ -70,6 +72,8 @@ PIPELINES = {
     "tuned-cpu":       {"pca": "pc-randomized", "knn": "nn-scanpy-mt", "cluster": "cl-baseline"},
     "all-gpu":         {"pca": "pc-rapids",     "knn": "nn-rapids",    "cluster": "cl-rapids"},
     "hybrid":          {"pca": "pc-rapids",     "knn": "nn-rapids",    "cluster": "cl-baseline"},
+    "seurat-defaults": {"pca": "pc-seurat",     "knn": "nn-seurat",    "cluster": "cl-seurat"},
+    "brisc-defaults":  {"pca": "pc-brisc",      "knn": "nn-brisc",     "cluster": "cl-brisc"},
 }
 
 

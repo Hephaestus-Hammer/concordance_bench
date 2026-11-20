@@ -7,14 +7,14 @@ picks:
     '*': all
   pca:
     pc-rapids:
-    - 06c99717
+    - b76ccf7a
   knn:
     nn-rapids:
-    - 6249b1a5
+    - 96e29d7a
   cluster:
     cl-rapids:
-    - 97e91371
-    - e4e4c48e
-    - 543d88a1
-    - f6264128
-    - b4d0669f
+    - 83cc4354
+    - 0e1e7052
+    - 639829ac
+    - 159b6600
+    - 92f39121

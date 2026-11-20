@@ -24,10 +24,11 @@ docs/phase2-plan.md's; in short:
                     resolution, so a worse PCA or kNN cannot be rescued by another resolution;
                     the Clustering tab and the named pipelines use their own.
   cost              wall time: of a stage's own job in the stage tabs; per answer for the named
-                    pipelines: at a fixed resolution PCA + kNN + one Leiden run, at "oracle" PCA
-                    + kNN + Leiden at every resolution of the sweep (choosing the best needs them
-                    all). The first rapids job of a module in a folder is a cold start: flagged,
-                    and left out of medians where there are others.
+                    pipelines always the whole sweep, PCA + kNN + Leiden at every resolution,
+                    whatever resolution the accuracy is read at: running a pipeline means
+                    sweeping the resolution, so that is what choosing one costs. The first
+                    rapids job of a module in a folder is a cold start: flagged, and left out of
+                    medians where there are others.
   concordance       between two implementations: the median agreement between their runs
                     against each one's own seed floor (median agreement between its own runs);
                     gap = floor - between. No significance tests.
@@ -55,10 +56,15 @@ Outputs (phase2_<name>.tsv):
                             reproducibility, cost, log10 cost against the fastest
   pipelines_runs            the named pipelines' runs per res_key (accuracy distributions)
   celltypes                 per cell type (reference label): its best-match Jaccard with the
-                            clusters, median over seeds, per Clustering module and named
+                            clusters and its one-vs-rest ARI against that best cluster,
+                            medians over seeds, per Clustering module and named
                             pipeline, dataset, size and res_key
   traces                    memory (RAM and GPU, GB) and cores busy over time of one representative job per
                             module (the median wall time) at each dataset's largest size
+  time                      where a named pipeline's time goes (the whole sweep): per dataset and size, the median
+                            seconds of each segment (startup, gpu_transfer, pca, knn, cluster; io, the
+                            load and write phases, listed but left out of the total), from the modules'
+                            obkit phases over their denet traces
   obs                       every individual observation behind the medians, for box plots:
                             tab, metric, group (module, pipeline or "A vs B"), dataset,
                             subsample, cells, res_key ("*" where the resolution does not
@@ -74,6 +80,7 @@ an answer's peak is the largest of its jobs' (the stages run one after another).
 import argparse
 import itertools
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -83,8 +90,11 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
 import concordance as cc  # noqa: E402
+import progress  # noqa: E402
 import resources as rs  # noqa: E402
 from load import REPLICATE_KEYS, index_runs  # noqa: E402
+
+LOG = progress.NULL  # main() swaps in a real Log; tests and importers stay quiet
 
 STAGES = ("pca", "knn", "cluster")
 BASELINE = {"pca": "pc-baseline", "knn": "nn-baseline", "cluster": "cl-baseline"}
@@ -96,6 +106,8 @@ PIPELINES = {  # keep in step with scripts/make_filters.py
     "tuned-cpu":       ("pc-randomized", "nn-scanpy-mt", "cl-baseline"),
     "all-gpu":         ("pc-rapids", "nn-rapids", "cl-rapids"),
     "hybrid":          ("pc-rapids", "nn-rapids", "cl-baseline"),
+    "seurat-defaults": ("pc-seurat", "nn-seurat", "cl-seurat"),
+    "brisc-defaults":  ("pc-brisc", "nn-brisc", "cl-brisc"),
 }
 
 
@@ -180,10 +192,12 @@ def oracle_bounds(embedding, labels, folds=5, seed=0):
     return out[0][0], out[1][0], out[0][1], out[1][1]
 
 
-def accuracy(df, runs, celltypes=None):
+def accuracy(df, runs, celltypes=None, with_bounds=True):
     """Adds ari_truth, jaccard_truth, homogeneity, completeness and clusters (their number) to
     runs; returns (runs, bounds). `celltypes`, a list, gets one row per run and label: the
-    label's best-match Jaccard with the run's clusters (how well that cell type is recovered)."""
+    label's best-match Jaccard with the run's clusters and the one-vs-rest ARI against that
+    best cluster (how well that cell type is recovered).
+    with_bounds=False skips the oracle bounds (cross-validated classifiers: slow at 100k cells)."""
     from sklearn.metrics import homogeneity_completeness_v_measure
 
     runs = runs.copy()
@@ -192,6 +206,7 @@ def accuracy(df, runs, celltypes=None):
     bounds = []
     truth_rows = df[df["output"] == "rawdata_clusters_truth"]
     emb_rows = df[df["output"] == "embedding_tsv"]
+    bar = LOG.bar("clusterings scored", len(runs))
     for (dataset, subsample, run), idx in runs.groupby(["dataset", "subsample", "run"]).groups.items():
         # each folder's own truth file (replicate folders hold identical ones)
         t = truth_rows[[n[0].module == dataset and len(n) > 1 and n[1].module == subsample and _run_tag(n) == run
@@ -212,14 +227,17 @@ def accuracy(df, runs, celltypes=None):
             h, c, _ = homogeneity_completeness_v_measure(tc, codes)
             runs.at[i, "homogeneity"], runs.at[i, "completeness"] = h, c
             runs.at[i, "clusters"] = codes.max() + 1
+            bar.tick()
             if celltypes is not None:
-                celltypes.extend({"row": i, "label": names[li], "label_cells": int(sizes[li]), "jaccard": float(jt[li])}
-                                 for li in range(len(names)))
-        if any(b["dataset"] == dataset and b["subsample"] == subsample for b in bounds):
+                _, ct_ari = cc.celltype_scores(tc, codes)
+                celltypes.extend({"row": i, "label": names[li], "label_cells": int(sizes[li]), "jaccard": float(jt[li]),
+                                  "ari": float(ct_ari[li])} for li in range(len(names)))
+        if not with_bounds or any(b["dataset"] == dataset and b["subsample"] == subsample for b in bounds):
             continue  # one bound per dataset and size, from the first folder
         e = emb_rows[[n[0].module == dataset and n[1].module == subsample and n[-1].module == BASELINE["pca"]
                       for n in emb_rows["nodes"]]]
         e = e if len(e) else emb_rows[[n[0].module == dataset and n[1].module == subsample for n in emb_rows["nodes"]]]
+        LOG.say(f"  oracle bounds for {dataset} {subsample} (cross-validated classifiers on {len(truth):,} cells)")
         lr, knn, lr_j, knn_j = (oracle_bounds(cc.read_embedding(e["path"].iloc[0]).reindex(order).to_numpy(),
                                               truth.to_numpy()) if len(e) else (np.nan,) * 4)
         best = lambda v: float(np.nanmax(v)) if np.isfinite(v).any() else np.nan  # noqa: E731
@@ -235,6 +253,7 @@ def add_modularity(df, runs):
     runs = runs.copy()
     runs["modularity"] = np.nan
     nb = df[df["output"] == "neighbors_h5"]
+    bar = LOG.bar("clusterings", len(runs))
     for (d, s, run), idx in runs.groupby(["dataset", "subsample", "run"]).groups.items():
         e = nb[[len(n) >= 4 and n[0].module == d and n[1].module == s and n[2].module == BASELINE["pca"]
                 and n[3].module == BASELINE["knn"] and _run_tag(n) == run for n in nb["nodes"]]]
@@ -243,6 +262,7 @@ def add_modularity(df, runs):
         graph, cells = cc.read_connectivities(e["path"].iloc[0])
         graph = ((graph + graph.T) / 2).tocsr()
         for i in idx:
+            bar.tick()
             lab = cc.read_clusters(runs.at[i, "path"]).reindex(cells)
             if lab.isna().any():
                 continue
@@ -271,7 +291,10 @@ def pair_obs(runs, key, same_folder):
     (stability), or identical seeds across folders (reproducibility). One row per pair."""
     seeds = ["pca_seed", "knn_seed", "cluster_seed"]
     out = []
-    for k, g in runs.groupby(key, dropna=False):
+    groups = runs.groupby(key, dropna=False)
+    bar = LOG.bar("groups of runs", groups.ngroups)
+    for k, g in groups:
+        bar.tick()
         if len(g) < 2:
             continue
         order = cc.read_clusters(g["path"].iloc[0]).index
@@ -327,12 +350,14 @@ def pca_stage(df):
         return cache[r["dir"]]
 
     t["fidelity"] = np.nan
+    bar = LOG.bar("PCA runs read", len(t))
     for (d, s, run), g in t.groupby(["dataset", "subsample", "run"]):
         ex = g[g["module"] == BASELINE["pca"]]
         if not len(ex):
             continue
         v_ex, var_ex = get(ex.iloc[0])
         for i, r in g.iterrows():
+            bar.tick()
             v, _ = get(r)
             t.at[i, "fidelity"] = cc.pca_fidelity(v_ex.to_numpy(), var_ex, v.reindex(v_ex.index).to_numpy())
     pairs = []
@@ -366,12 +391,14 @@ def knn_stage(df):
         return near[r["dir"]]
 
     t["fidelity"] = np.nan
+    bar = LOG.bar("kNN graphs read", len(t))
     for (d, s, run), g in t.groupby(["dataset", "subsample", "run"]):
         ex = g[g["module"] == BASELINE["knn"]]
         if not len(ex):
             continue
         g_ex, _ = get(ex.iloc[0])
         for i, r in g.iterrows():
+            bar.tick()
             t.at[i, "fidelity"] = float(cc.knn_shared_fraction(g_ex, get(r)[0]).mean())
     pairs = []
     for (d, s, m), g in t.groupby(["dataset", "subsample", "module"]):
@@ -571,6 +598,161 @@ def answers(runs, rt, cold):
     return pd.DataFrame(out)
 
 
+# ---- where the time goes ---------------------------------------------------------------
+
+# Segments of a job's wall time, from its obkit phases over its denet trace. Reading the input
+# and writing the output are left out (the same files for every method; they measure the disk
+# and the format, not the method); start-up and GPU transfers stay in, as the price of running
+# the method at all.
+SEGMENTS = ["startup", "gpu_transfer", "pca", "knn", "cluster"]
+IO_PHASES = {"load", "write"}
+GPU_PHASES = {"gpu_upload", "gpu_download"}
+
+
+def segment(stage, phase):
+    """A phase's segment: io (left out), startup, gpu_transfer, or the stage's own work."""
+    if phase in IO_PHASES:
+        return "io"
+    if phase in GPU_PHASES:
+        return "gpu_transfer"
+    if phase == "(unphased)":
+        return "startup"
+    return stage
+
+
+def job_segments(rt, ph):
+    """{job dir: {segment: seconds}}. A job without phases counts whole as its stage's work."""
+    out = {}
+    if len(ph):
+        for (d, stage), g in ph.groupby(["dir", "stage"]):
+            seg = {}
+            for _, r in g.iterrows():
+                k = segment(stage, r["phase"])
+                seg[k] = seg.get(k, 0.0) + float(r["duration_s"])
+            out[d] = seg
+    for _, r in rt.iterrows():
+        if r["dir"] not in out and r["stage"] in STAGES and np.isfinite(r["s"]):
+            out[r["dir"]] = {r["stage"]: float(r["s"]), "unphased_job": 1.0}
+    return out
+
+
+def time_breakdown(named, rt, ph, cold, bounds):
+    """Per named pipeline, dataset and size: the median seconds of each segment over the
+    pipeline's answers, each the whole sweep (PCA + kNN + Leiden at every resolution, as a
+    pipeline is run), cold starts left out where there are others. res_key "*": the same at
+    every resolution. Long format: one row per segment, io included for reference (not part of
+    the bar)."""
+    if not len(named):
+        return pd.DataFrame()
+    segs = job_segments(rt, ph)
+    cells = {(b["dataset"], b["subsample"]): b["cells"] for _, b in bounds.iterrows()} if len(bounds) else {}
+    key = ["dataset", "subsample", "named", "pca_seed", "knn_seed", "cluster_seed", "run"]
+    answers_ = []
+    for k, g in named.groupby(key, dropna=False):
+        for rk, gr in (("*", g),):
+            dirs = [g["pca_dir"].iloc[0], g["knn_dir"].iloc[0], *gr["cluster_dir"]]
+            if any(d not in segs for d in dirs):
+                continue
+            tot = {}
+            for d in dirs:
+                for sname, v in segs[d].items():
+                    tot[sname] = tot.get(sname, 0.0) + v
+            answers_.append({**dict(zip(key, k)), "res_key": rk, "cold": any(d in cold for d in dirs),
+                             "resolutions": len(gr), **tot})
+    a = pd.DataFrame(answers_)
+    if not len(a):
+        return pd.DataFrame()
+    for c in [*SEGMENTS, "io", "unphased_job"]:
+        a[c] = a[c].fillna(0.0) if c in a else 0.0
+    rows = []
+    for (d, sub, name, rk), g in a.groupby(["dataset", "subsample", "named", "res_key"]):
+        g = g[~g["cold"]] if (~g["cold"]).any() else g
+        base = {"dataset": d, "subsample": sub, "cells": cells.get((d, sub), np.nan), "pipeline": name,
+                "res_key": rk, "answers": len(g), "resolutions": int(g["resolutions"].iloc[0]),
+                "unphased_jobs": int((g["unphased_job"] > 0).sum())}
+        meds = {c: float(g[c].median()) for c in [*SEGMENTS, "io"]}
+        total = sum(meds[c] for c in SEGMENTS)
+        for c in [*SEGMENTS, "io"]:
+            rows.append({**base, "segment": c, "seconds": meds[c],
+                         "share": meds[c] / total if total > 0 and c != "io" else np.nan, "total_s": total})
+    return pd.DataFrame(rows)
+
+
+# ---- where the memory goes -------------------------------------------------------------
+
+# The same segments as the time, but memory does not add up: each segment's height is the peak
+# reached while the process was in it (RAM: resident set; GPU: the process's own device memory),
+# and a pipeline's peak is the largest of them (its stages run one after another, in separate
+# processes). Peaks come from denet's samples, so a phase shorter than the sampling interval can
+# show no sample (left blank) or miss a brief spike.
+# Peaks count only the samples taken inside a segment (resources: rss_in_mb, gpu_in_mb), so a short
+# phase does not inherit its neighbour's peak.
+MEM_KINDS = {"rss": ("rss_in_mb", "max_rss"), "gpu": ("gpu_in_mb", "gpu_mem_peak_mb")}
+
+
+def job_memory(rt, ph):
+    """{job dir: {segment: {"rss": MB, "gpu": MB}}}, the peak in each segment. A job without phases
+    counts whole as its stage's work, at the job's peak."""
+    out = {}
+    if len(ph):
+        for (d, stage), g in ph.groupby(["dir", "stage"]):
+            seg = {}
+            for _, r in g.iterrows():
+                k = segment(stage, r["phase"])
+                cur = seg.setdefault(k, {"rss": np.nan, "gpu": np.nan})
+                for kind, (col, _) in MEM_KINDS.items():
+                    v = float(r[col]) if pd.notna(r[col]) else np.nan
+                    cur[kind] = np.nanmax([cur[kind], v]) if np.isfinite(v) else cur[kind]
+            out[d] = seg
+    for _, r in rt.iterrows():
+        if r["dir"] not in out and r["stage"] in STAGES:
+            out[r["dir"]] = {r["stage"]: {kind: float(r[col]) if pd.notna(r[col]) else np.nan
+                                          for kind, (_, col) in MEM_KINDS.items()},
+                             "unphased_job": {"rss": 1.0, "gpu": np.nan}}
+    return out
+
+
+def memory_breakdown(named, rt, ph, cold, bounds):
+    """Per named pipeline, dataset and size: the median over the pipeline's answers (each the whole
+    sweep, cold starts left out where there are others) of the peak RAM and GPU memory in each
+    segment, and of the answer's overall peak (the largest segment, io left out). Long format: one
+    row per segment, io included for reference (not part of the peak). MB."""
+    if not len(named):
+        return pd.DataFrame()
+    mem = job_memory(rt, ph)
+    cells = {(b["dataset"], b["subsample"]): b["cells"] for _, b in bounds.iterrows()} if len(bounds) else {}
+    key = ["dataset", "subsample", "named", "pca_seed", "knn_seed", "cluster_seed", "run"]
+    answers_ = []
+    for k, g in named.groupby(key, dropna=False):
+        dirs = [g["pca_dir"].iloc[0], g["knn_dir"].iloc[0], *g["cluster_dir"]]
+        if any(d not in mem for d in dirs):
+            continue
+        row = {**dict(zip(key, k)), "res_key": "*", "cold": any(d in cold for d in dirs),
+               "unphased_job": any("unphased_job" in mem[d] for d in dirs)}
+        for sname in [*SEGMENTS, "io"]:
+            for kind in MEM_KINDS:
+                vals = [mem[d][sname][kind] for d in dirs if sname in mem[d]]
+                vals = [v for v in vals if np.isfinite(v)]
+                row[f"{sname}:{kind}"] = max(vals) if vals else np.nan
+        for kind in MEM_KINDS:
+            vals = [row[f"{s_}:{kind}"] for s_ in SEGMENTS if np.isfinite(row[f"{s_}:{kind}"])]
+            row[f"peak:{kind}"] = max(vals) if vals else np.nan
+        answers_.append(row)
+    a = pd.DataFrame(answers_)
+    if not len(a):
+        return pd.DataFrame()
+    rows = []
+    for (d, sub, name, rk), g in a.groupby(["dataset", "subsample", "named", "res_key"]):
+        g = g[~g["cold"]] if (~g["cold"]).any() else g
+        base = {"dataset": d, "subsample": sub, "cells": cells.get((d, sub), np.nan), "pipeline": name,
+                "res_key": rk, "answers": len(g), "unphased_jobs": int(g["unphased_job"].sum()),
+                "peak_rss_mb": float(g["peak:rss"].median()), "peak_gpu_mb": float(g["peak:gpu"].median())}
+        for c in [*SEGMENTS, "io"]:
+            rows.append({**base, "segment": c, "rss_mb": float(g[f"{c}:rss"].median()),
+                         "gpu_mb": float(g[f"{c}:gpu"].median())})
+    return pd.DataFrame(rows)
+
+
 # ---- summaries -------------------------------------------------------------------------
 
 def _pick(t, col="median", **where):
@@ -716,8 +898,17 @@ def _pick_j(po, d, s, pipeline, res):
     return float(v["jaccard"].median()) if len(v) else np.nan
 
 
+def _mean_pairs(po, d, s, pipeline, res, col):
+    """Mean over the same-seed pairs (reproducibility) of one pipeline, dataset, size and
+    resolution; NaN without replicate folders."""
+    if po is None or not len(po):
+        return np.nan
+    v = po[(po["dataset"] == d) & (po["subsample"] == s) & (po["pipeline"] == pipeline) & (po["resolution"] == res)]
+    return float(v[col].mean()) if len(v) else np.nan
+
+
 def celltype_table(runs, celltypes, ct_rows):
-    """Per cell type: its best-match Jaccard with the clusters, median over the group's runs."""
+    """Per cell type: its best-match Jaccard and one-vs-rest ARI, medians over the group's runs."""
     if not celltypes or not ct_rows:
         return pd.DataFrame()
     ct = pd.DataFrame(celltypes).set_index("row")
@@ -726,7 +917,8 @@ def celltype_table(runs, celltypes, ct_rows):
         g = ct[ct.index.isin(idx)]
         for (label, size), x in g.groupby(["label", "label_cells"]):
             out.append({"tab": tab, "group": group, "dataset": d, "subsample": s, "cells": cells, "res_key": key,
-                        "label": label, "label_cells": size, "jaccard": float(x["jaccard"].median()), "runs": len(x)})
+                        "label": label, "label_cells": size, "jaccard": float(x["jaccard"].median()),
+                        "ari": float(x["ari"].median()) if "ari" in x else np.nan, "runs": len(x)})
     return pd.DataFrame(out)
 
 
@@ -782,8 +974,9 @@ def named_pipeline_runs(runs):
 
 
 def pipelines_summary(named, bounds, stab, repro, ans, stab_obs=None, repro_obs=None, obs=None, ct_rows=None):
-    """Named pipeline x dataset x size x res_key. At a fixed resolution the cost of an answer is
-    PCA + kNN + one Leiden run; at "oracle" the whole sweep, since choosing needs every run."""
+    """Named pipeline x dataset x size x res_key. The cost of an answer is always the whole sweep
+    (PCA + kNN + Leiden at every resolution): a pipeline is run with a resolution sweep, so
+    that is its cost at whatever resolution its accuracy is read."""
     b = bounds.set_index(["dataset", "subsample"]) if len(bounds) else pd.DataFrame()
     grid = sorted(named["resolution"].dropna().unique()) if len(named) else []
     rows, at_res = [], []
@@ -798,7 +991,7 @@ def pipelines_summary(named, bounds, stab, repro, ans, stab_obs=None, repro_obs=
             at = g[g["resolution"] == res]
             if not len(at):
                 continue
-            c = a[a["scope"] == "sweep"] if key == ORACLE else a[(a["scope"] == "single") & (a["resolution"] == res)]
+            c = a[a["scope"] == "sweep"]  # the whole sweep, at every res_key
             if obs is not None:
                 cells = b.at[(d, s), "cells"] if (d, s) in b.index else np.nan
                 base = {"tab": "pipeline", "group": name, "dataset": d, "subsample": s, "cells": cells, "res_key": key}
@@ -834,6 +1027,8 @@ def pipelines_summary(named, bounds, stab, repro, ans, stab_obs=None, repro_obs=
                          "reproducibility": _pick(repro, dataset=d, subsample=s, pipeline=pipeline, resolution=res),
                          "stability_jaccard": _pick_j(stab_obs, d, s, pipeline, res),
                          "reproducibility_jaccard": _pick_j(repro_obs, d, s, pipeline, res),
+                         "reproducibility_mean": _mean_pairs(repro_obs, d, s, pipeline, res, "value"),
+                         "reproducibility_jaccard_mean": _mean_pairs(repro_obs, d, s, pipeline, res, "jaccard"),
                          **_run_metrics(at),
                          "cost_s": warm_median(c) if len(c) else np.nan,
                          "cpu_s": warm_median(c, "cpu_s") if len(c) else np.nan,
@@ -874,55 +1069,96 @@ def main():
                    help="write the TSVs only; skip rendering report/phase2.qmd to HTML")
     args = p.parse_args()
 
-    df = index_runs(args.from_out)
-    runs = clustering_table(df)
-    if not len(runs):
-        raise SystemExit("no Phase 2 clusterings found (data > input > pca > knn > cluster)")
+    global LOG
+    LOG = progress.Log("phase2", steps=12)
+    LOG.say(f"analysing {len(args.from_out)} folder(s): {' '.join(str(f) for f in args.from_out)}")
+    with LOG.step("indexing the output folders"):
+        df = index_runs(args.from_out)
+        runs = clustering_table(df)
+        if not len(runs):
+            raise SystemExit("no Phase 2 clusterings found (data > input > pca > knn > cluster)")
+        LOG.say(f"  {len(df):,} outputs, {len(runs):,} clusterings")
     celltypes = []
-    runs, bounds = accuracy(df, runs, celltypes)
-    runs = add_modularity(df, runs)
-    stab_obs, repro_obs = pair_obs(runs, KEY, True), pair_obs(runs, KEY, False)
-    stab, repro = summarise_pairs(stab_obs, KEY), summarise_pairs(repro_obs, KEY)
-    rt = rs.runtimes(df)[0]
-    cold = cold_starts(rt)
-    pca, pca_pairs = pca_stage(df)
-    knn, knn_pairs = knn_stage(df)
-    pca = add_cost(pca, rt, cold) if len(pca) else pca
-    knn = add_cost(knn, rt, cold) if len(knn) else knn
-    stage_conc = pd.concat([pca_concordance(pca), knn_concordance(knn), cluster_concordance(runs)],
-                           ignore_index=True)
-    ans = answers(runs, rt, cold)
-    obs, ct_rows = [], []
-    stages = stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs, celltypes, ct_rows)
-    named = named_pipeline_runs(runs)
-    pipes, pipe_runs = pipelines_summary(named, bounds, stab, repro, ans, stab_obs, repro_obs, obs, ct_rows)
-    cts = celltype_table(runs, celltypes, ct_rows)
-    obs = pd.concat([pd.DataFrame(obs), concordance_obs(stage_conc, bounds)], ignore_index=True)
-    stage_conc = stage_conc.drop(columns=[c for c in stage_conc.columns if c.startswith("_")])
+    with LOG.step("accuracy against the labels (and the oracle bounds)"):
+        runs, bounds = accuracy(df, runs, celltypes)
+    with LOG.step("modularity on the exact kNN graph"):
+        runs = add_modularity(df, runs)
+    with LOG.step("stability: every pair of seeds"):
+        stab_obs = pair_obs(runs, KEY, True)
+    with LOG.step("reproducibility: same seeds across folders"):
+        repro_obs = pair_obs(runs, KEY, False)
+        stab, repro = summarise_pairs(stab_obs, KEY), summarise_pairs(repro_obs, KEY)
+    with LOG.step("run times, memory and phases (denet, obkit)"):
+        rt, _, ph = rs.runtimes(df)
+        cold = cold_starts(rt)
+        LOG.say(f"  {len(rt):,} jobs")
+    with LOG.step("PCA slice: fidelity and agreement"):
+        pca, pca_pairs = pca_stage(df)
+        pca = add_cost(pca, rt, cold) if len(pca) else pca
+    with LOG.step("kNN slice: recall and shared neighbours"):
+        knn, knn_pairs = knn_stage(df)
+        knn = add_cost(knn, rt, cold) if len(knn) else knn
+    with LOG.step("concordance between implementations"):
+        stage_conc = pd.concat([pca_concordance(pca), knn_concordance(knn), cluster_concordance(runs)],
+                               ignore_index=True)
+    with LOG.step("stage and pipeline summaries"):
+        ans = answers(runs, rt, cold)
+        obs, ct_rows = [], []
+        stages = stages_summary(runs, bounds, pca, pca_pairs, knn, knn_pairs, rt, cold, obs, celltypes, ct_rows)
+        named = named_pipeline_runs(runs)
+        pipes, pipe_runs = pipelines_summary(named, bounds, stab, repro, ans, stab_obs, repro_obs, obs, ct_rows)
+        cts = celltype_table(runs, celltypes, ct_rows)
+        obs = pd.concat([pd.DataFrame(obs), concordance_obs(stage_conc, bounds)], ignore_index=True)
+        stage_conc = stage_conc.drop(columns=[c for c in stage_conc.columns if c.startswith("_")])
 
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
+    LOG.i += 1
+    LOG.say(f"step {LOG.i}/{LOG.steps}: traces, time and memory breakdowns and the tables in {out}")
     drop = ["path", "pca_dir", "knn_dir", "cluster_dir", "loadings", "dir"]
     tables = {"bounds": bounds, "runs": runs, "jobs": rt, "pca": pca, "pca_pairs": pca_pairs, "knn": knn,
               "knn_pairs": knn_pairs, "stability": stab, "reproducibility": repro, "stages": stages,
               "answers": ans, "pipelines": pipes, "pipelines_runs": pipe_runs,
-              "stage_concordance": stage_conc, "obs": obs, "celltypes": cts, "traces": traces(rt, runs, bounds)}
+              "stage_concordance": stage_conc, "obs": obs, "celltypes": cts, "traces": traces(rt, runs, bounds),
+              "time": time_breakdown(named, rt, ph, cold, bounds),
+              "memory": memory_breakdown(named, rt, ph, cold, bounds)}
     for name, t in tables.items():
         t.drop(columns=[c for c in drop if c in t.columns and name != "jobs"]).to_csv(
             out / f"phase2_{name}.tsv", sep="\t", index=False)
-    print(f"wrote {out}/phase2_*.tsv: {len(runs)} clusterings, {len(stages)} stage rows, "
-          f"{len(pipes)} named-pipeline rows")
+    pd.DataFrame({"folder": [Path(f).name for f in args.from_out],
+                  "precision": [_folder_part(f, ("float32", "float64")) for f in args.from_out],
+                  "format": [_folder_part(f, ("10x", "h5ad", "h5ad-dense")) or "omni" for f in args.from_out],
+                  "hardware": [_folder_hardware(f) for f in args.from_out]}).to_csv(
+        out / "phase2_folders.tsv", sep="\t", index=False)
+    LOG.say(f"  wrote {out}/phase2_*.tsv: {len(runs)} clusterings, {len(stages)} stage rows, "
+            f"{len(pipes)} named-pipeline rows")
     if not args.no_report:
-        render_report(out)
+        with LOG.step("rendering the report (quarto prints each cell as it runs)"):
+            render_report(out)
+    LOG.say("finished")
+
+
+def _folder_part(folder, options):
+    name = Path(folder).name
+    return next((o for o in options if o in name.split("_")), "")
+
+
+def _folder_hardware(folder):
+    """The hardware tag scripts/hw_tag.sh put in the folder name (<GPU>_<N>core), if any."""
+    parts = Path(folder).name.split("_")
+    i = next((i for i, x in enumerate(parts) if x.endswith("core") and x[:-4].isdigit()), None)
+    return "_".join(parts[i - 1:i + 1]) if i else ""
 
 
 def render_report(out):
-    """Render report/phase2.qmd from the TSVs in `out` to out/phase2.html (needs quarto)."""
+    """Render report/phase2.qmd from the TSVs in `out` to out/phase2.html (needs quarto), and copy the
+    .qmd next to it."""
     out = out.resolve()
     qmd = Path(__file__).resolve().parent.parent / "report" / "phase2.qmd"
     subprocess.run(["quarto", "render", str(qmd), "--output-dir", str(out)], check=True,
                    env={**os.environ, "PHASE2_RESULTS": str(out)})
-    print(f"wrote {out / 'phase2.html'}")
+    shutil.copy2(qmd, out / qmd.name)  # the source next to the page it drew
+    print(f"wrote {out / 'phase2.html'} and {out / qmd.name}")
 
 
 if __name__ == "__main__":
